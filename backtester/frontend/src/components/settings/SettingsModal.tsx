@@ -1,9 +1,11 @@
 "use client";
 import { useState, useEffect } from "react";
-import { X, RefreshCw, Database, Shield, Clock } from "lucide-react";
+import { X, RefreshCw, Database, Shield, Clock, TrendingUp } from "lucide-react";
 import { useAuth } from "@/hooks";
 import { getMasterStatus, collectMasterFiles } from "@/lib/api/symbols";
+import { getMarketLeadersStatus, triggerMarketLeadersUpdate } from "@/lib/api/market_leaders";
 import type { MasterStatus } from "@/types/symbols";
+import type { MarketLeadersStatus } from "@/types/market_leaders";
 import type { AuthMode } from "@/types/auth";
 
 interface SettingsModalProps {
@@ -16,10 +18,14 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const [masterStatus, setMasterStatus] = useState<MasterStatus | null>(null);
   const [isCollecting, setIsCollecting] = useState(false);
   const [cooldownTimer, setCooldownTimer] = useState(0);
+  const [mlStatus, setMlStatus] = useState<MarketLeadersStatus | null>(null);
+  const [isUpdatingML, setIsUpdatingML] = useState(false);
+  const [mlUpdateMsg, setMlUpdateMsg] = useState<string | null>(null);
 
   useEffect(() => {
     if (isOpen) {
       fetchMasterStatus();
+      fetchMLStatus();
     }
   }, [isOpen]);
 
@@ -45,6 +51,29 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       setMasterStatus(await getMasterStatus());
     } catch {
       // 상태 조회 실패 시 무시
+    }
+  };
+
+  const fetchMLStatus = async () => {
+    try {
+      setMlStatus(await getMarketLeadersStatus());
+    } catch {
+      // 무시
+    }
+  };
+
+  const handleMLUpdate = async () => {
+    setIsUpdatingML(true);
+    setMlUpdateMsg(null);
+    try {
+      const res = await triggerMarketLeadersUpdate();
+      setMlUpdateMsg(res.message);
+      setMlStatus((prev) => prev ? { ...prev, is_updating: true } : prev);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "업데이트 실패";
+      setMlUpdateMsg(msg.includes("401") ? "KIS API 인증 후 업데이트를 실행하세요." : msg);
+    } finally {
+      setIsUpdatingML(false);
     }
   };
 
@@ -297,6 +326,63 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                   </span>
                 ) : (
                   "마스터파일 수집"
+                )}
+              </button>
+            </div>
+          </section>
+
+          {/* 시장 선도주 섹션 */}
+          <section className="space-y-3">
+            <div className="flex items-center gap-2 text-sm font-medium text-slate-700 dark:text-slate-300">
+              <TrendingUp className="w-4 h-4 text-amber-500" />
+              시장 선도주
+            </div>
+            <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg space-y-3">
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                시가총액 상위 150, 매출 상위 150, 거래대금 상위 300 기준으로 선정됩니다.
+                매일 업데이트가 필요하며 KIS API 인증 후 사용 가능합니다.
+              </p>
+              {mlStatus && (
+                <div className="space-y-1.5 text-sm">
+                  <div className="flex justify-between">
+                    <span className="text-slate-600 dark:text-slate-400">전체 선도주</span>
+                    <span className="font-mono">{mlStatus.counts.all_leaders ?? 0}개</span>
+                  </div>
+                  {mlStatus.last_updated && (
+                    <div className="text-xs text-slate-500 dark:text-slate-400">
+                      마지막 업데이트: {new Date(mlStatus.last_updated).toLocaleString()}
+                    </div>
+                  )}
+                  {mlStatus.needs_update && !mlStatus.is_updating && (
+                    <div className="text-xs text-amber-600 dark:text-amber-400">
+                      업데이트가 필요합니다
+                    </div>
+                  )}
+                  {mlStatus.is_updating && (
+                    <div className="flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">
+                      <RefreshCw className="w-3 h-3 animate-spin" />
+                      업데이트 진행 중...
+                    </div>
+                  )}
+                </div>
+              )}
+              {mlUpdateMsg && (
+                <div className="text-xs text-slate-600 dark:text-slate-400 bg-slate-100 dark:bg-slate-700 px-2 py-1.5 rounded">
+                  {mlUpdateMsg}
+                </div>
+              )}
+              <button
+                onClick={handleMLUpdate}
+                disabled={isUpdatingML || mlStatus?.is_updating}
+                className="w-full py-2 px-4 rounded-lg text-sm font-medium bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 hover:bg-amber-200 dark:hover:bg-amber-900/50 transition-colors disabled:opacity-50"
+              >
+                {isUpdatingML || mlStatus?.is_updating ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    업데이트 중...
+                  </span>
+                ) : (
+                  "시장 선도주 업데이트"
                 )}
               </button>
             </div>

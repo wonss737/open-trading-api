@@ -4,8 +4,11 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { X, Search, Loader2, AlertTriangle } from "lucide-react";
 import { searchSymbols, getSymbolByCode, getMasterStatus } from "@/lib/api/symbols";
 import type { Symbol } from "@/types/symbols";
+import { MarketLeadersPanel } from "./MarketLeadersPanel";
 
 const STORAGE_KEY = "kis_backtest_stocks";
+
+type InputMode = "search" | "market_leaders";
 
 interface StockWithName {
   code: string;
@@ -21,6 +24,7 @@ interface StockInputProps {
 const POPULAR_CODES = ["005930", "000660", "035720", "005380", "051910", "035420"];
 
 export function StockInput({ stocks, onChange }: StockInputProps) {
+  const [inputMode, setInputMode] = useState<InputMode>("search");
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Symbol[]>([]);
   const [isOpen, setIsOpen] = useState(false);
@@ -307,12 +311,54 @@ export function StockInput({ stocks, onChange }: StockInputProps) {
     return stockNames[code] || "";
   };
 
+  // 시장 선도주 패널에서 종목 일괄 추가
+  const handleAddMarketLeaders = useCallback(
+    (codes: string[], names: Record<string, string>) => {
+      const newCodes = codes.filter((c) => !stocks.includes(c));
+      if (newCodes.length === 0) return;
+      onChange([...stocks, ...newCodes]);
+      setStockNames((prev) => ({ ...prev, ...names }));
+    },
+    [stocks, onChange]
+  );
+
   return (
     <div className="space-y-3">
-      <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">
-        종목 검색
-      </label>
+      {/* 탭: 종목 검색 / 시장 선도주 */}
+      <div className="flex gap-1 border-b border-slate-200 dark:border-slate-700 pb-1">
+        <button
+          onClick={() => setInputMode("search")}
+          className={`px-3 py-1.5 text-sm font-medium rounded-t transition-colors ${
+            inputMode === "search"
+              ? "text-primary border-b-2 border-primary"
+              : "text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
+          }`}
+        >
+          종목 검색
+        </button>
+        <button
+          onClick={() => setInputMode("market_leaders")}
+          className={`px-3 py-1.5 text-sm font-medium rounded-t transition-colors ${
+            inputMode === "market_leaders"
+              ? "text-amber-600 border-b-2 border-amber-500"
+              : "text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
+          }`}
+        >
+          시장 선도주
+        </button>
+      </div>
 
+      {/* 시장 선도주 패널 */}
+      {inputMode === "market_leaders" && (
+        <MarketLeadersPanel
+          selectedStocks={stocks}
+          onAddStocks={handleAddMarketLeaders}
+        />
+      )}
+
+      {/* 종목 검색 패널 */}
+      {inputMode === "search" && (
+        <>
       {/* 마스터파일 미수집 안내 */}
       {needsCollection && (
         <div className="flex items-center gap-2 px-3 py-2 text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg">
@@ -393,9 +439,29 @@ export function StockInput({ stocks, onChange }: StockInputProps) {
         )}
       </div>
 
-      {/* Selected Stocks */}
+      {/* Quick Select (마스터파일 기반) */}
+      {popularStocks.length > 0 && (
+        <div className="pt-2">
+          <p className="text-xs text-slate-500 mb-2">빠른 선택</p>
+          <div className="flex flex-wrap gap-2">
+            {popularStocks.filter((s) => !stocks.includes(s.code)).map((stock) => (
+              <button
+                key={stock.code}
+                onClick={() => addStockByCode(stock.code, stock.name)}
+                className="px-3 py-1 text-sm border border-slate-200 dark:border-slate-700 rounded-full hover:border-primary hover:text-primary transition-colors"
+              >
+                {stock.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+        </>
+      )}
+
+      {/* 선택된 종목 (항상 표시) */}
       {stocks.length > 0 && (
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap gap-2 pt-1 border-t border-slate-100 dark:border-slate-800">
           {stocks.map((code) => {
             const name = getStockName(code);
             return (
@@ -415,24 +481,6 @@ export function StockInput({ stocks, onChange }: StockInputProps) {
               </span>
             );
           })}
-        </div>
-      )}
-
-      {/* Quick Select (마스터파일 기반) */}
-      {popularStocks.length > 0 && (
-        <div className="pt-2">
-          <p className="text-xs text-slate-500 mb-2">빠른 선택</p>
-          <div className="flex flex-wrap gap-2">
-            {popularStocks.filter((s) => !stocks.includes(s.code)).map((stock) => (
-              <button
-                key={stock.code}
-                onClick={() => addStockByCode(stock.code, stock.name)}
-                className="px-3 py-1 text-sm border border-slate-200 dark:border-slate-700 rounded-full hover:border-primary hover:text-primary transition-colors"
-              >
-                {stock.name}
-              </button>
-            ))}
-          </div>
         </div>
       )}
     </div>

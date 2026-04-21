@@ -10,9 +10,23 @@ echo "Frontend: http://localhost:3001"
 echo "Backend:  http://localhost:8002"
 echo ""
 
-# Kill existing processes on these ports
-lsof -ti:3001 | xargs kill -9 2>/dev/null
-lsof -ti:8002 | xargs kill -9 2>/dev/null
+# Kill existing processes on these ports and wait until released
+_kill_and_wait() {
+  local port=$1
+  local pids
+  pids=$(lsof -ti:"$port" 2>/dev/null)
+  if [ -n "$pids" ]; then
+    echo "$pids" | xargs kill -9 2>/dev/null
+    local waited=0
+    while lsof -ti:"$port" >/dev/null 2>&1; do
+      sleep 0.5
+      waited=$((waited + 1))
+      [ $waited -ge 20 ] && break
+    done
+  fi
+}
+_kill_and_wait 3001
+_kill_and_wait 8002
 
 # Check Lean data files
 SYMBOL_PROPS="$SCRIPT_DIR/.lean-workspace/data/symbol-properties/symbol-properties-database.csv"
