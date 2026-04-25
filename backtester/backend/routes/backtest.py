@@ -555,10 +555,20 @@ async def prepare_market_data(
             logger.info(f"[Data] 다운로드 중: {symbol} (market={'us' if _is_us_symbol(symbol) else 'krx'})")
 
             if _is_us_symbol(symbol):
-                # 해외주식: get_overseas_daily 사용 (기본 거래소: NASDAQ)
-                bars = provider.get_overseas_daily(symbol, exchange="nasdaq", end_date=req_end)
-                # 요청 기간만 필터링
-                bars = [b for b in bars if req_start <= b.time.date() <= req_end]
+                # 해외주식: NASDAQ → NYSE → AMEX 순으로 시도
+                bars = []
+                for exch in ["nasdaq", "nyse", "amex"]:
+                    try:
+                        candidate = provider.get_overseas_daily(
+                            symbol, exchange=exch,
+                            start_date=req_start, end_date=req_end,
+                        )
+                        if candidate:
+                            bars = candidate
+                            logger.info(f"[Data] {symbol} 거래소 확인: {exch}")
+                            break
+                    except Exception as exch_err:
+                        logger.warning(f"[Data] {symbol} ({exch}) 시도 실패: {exch_err}")
                 market_type = "us"
             else:
                 bars = provider.get_history(symbol, req_start, req_end)
@@ -711,7 +721,7 @@ async def _run_backtest_job(job: BacktestJobState, request: BacktestRequest) -> 
         logger.info(f"[Job {job.job_id}] 데이터: {data_result}")
         if data_result["errors"] and not data_result["downloaded"] and not data_result["skipped"]:
             error_msg = data_result["errors"][0]["error"] if data_result["errors"] else "데이터 다운로드 실패"
-            raise RuntimeError(f"데이터 준비 실패: {error_msg}\n\n• 종목 코드가 올바른지 확인하세요 (국내: 005930, 미국: AAPL)\n• 백테스트 기간에 거래일이 포함되어 있는지 확인하세요\n• KIS API 환경설정(.env)을 확인하세요")
+            raise RuntimeError(f"데이터 준비 실패: {error_msg}\n\n• 종목 코드가 올바른지 확인하세요 (국내: 005930, 미국: AAPL/MSFT)\n• 백테스트 기간에 거래일이 포함되어 있는지 확인하세요\n• KIS API 환경설정(.env)을 확인하세요")
 
         detected_market = data_result.get("market", "krx")
 
@@ -860,7 +870,7 @@ async def _run_custom_backtest_job(job: BacktestJobState, request: CustomBacktes
         logger.info(f"[Job {job.job_id}] 데이터: {data_result}")
         if data_result["errors"] and not data_result["downloaded"] and not data_result["skipped"]:
             error_msg = data_result["errors"][0]["error"] if data_result["errors"] else "데이터 다운로드 실패"
-            raise RuntimeError(f"데이터 준비 실패: {error_msg}\n\n• 종목 코드가 올바른지 확인하세요 (국내: 005930, 미국: AAPL)\n• 백테스트 기간에 거래일이 포함되어 있는지 확인하세요\n• KIS API 환경설정(.env)을 확인하세요")
+            raise RuntimeError(f"데이터 준비 실패: {error_msg}\n\n• 종목 코드가 올바른지 확인하세요 (국내: 005930, 미국: AAPL/MSFT)\n• 백테스트 기간에 거래일이 포함되어 있는지 확인하세요\n• KIS API 환경설정(.env)을 확인하세요")
 
         detected_market = data_result.get("market", "krx")
 

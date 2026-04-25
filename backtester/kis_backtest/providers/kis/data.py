@@ -372,21 +372,24 @@ class KISDataProvider:
         self,
         symbol: str,
         exchange: str,
-        end_date: Optional[date] = None
+        end_date: Optional[date] = None,
+        start_date: Optional[date] = None,
     ) -> List[Bar]:
         """해외주식 일봉 조회
-        
+
         API: /uapi/overseas-price/v1/quotations/dailyprice
         TR ID: HHDFS76240000
+
+        start_date까지 역순으로 페이지네이션합니다.
         """
         kis_excd = EXCHANGE_TO_KIS.get(exchange.lower(), exchange.upper()[:3])
-        end_str = end_date.strftime("%Y%m%d") if end_date else ""
-        
-        all_data = []
-        tr_cont = ""
-        current_bymd = end_str
-        
-        for _ in range(10):
+        current_bymd = end_date.strftime("%Y%m%d") if end_date else ""
+        start_str = start_date.strftime("%Y%m%d") if start_date else ""
+
+        all_data: list = []
+        seen_dates: set = set()
+
+        for _ in range(20):  # 최대 20페이지 (~600 거래일)
             params = {
                 "AUTH": "",
                 "EXCD": kis_excd,
@@ -395,35 +398,45 @@ class KISDataProvider:
                 "BYMD": current_bymd,
                 "MODP": "1",  # 수정주가
             }
-            
+
             resp = self._auth.get(
                 ApiPath.OVERSEAS_DAILY,
                 params,
                 TrId.OVERSEAS_DAILY,
-                tr_cont=tr_cont
             )
-            
+
             if not resp.is_ok():
-                logger.error(f"해외주식 조회 실패: {symbol} - {resp.error_message}")
+                logger.error(f"해외주식 조회 실패: {symbol} ({kis_excd}) - {resp.error_message}")
                 break
-            
+
             data = resp.get_output2()
-            if data:
-                all_data.extend(data)
-                last_date = data[-1].get("xymd", "")
-                if last_date:
-                    current_bymd = last_date
-            else:
+            if not data:
                 break
-            
-            # 연속조회 확인
-            tr_cont = getattr(resp.header, 'tr_cont', '')
-            if tr_cont not in ["M", "F"]:
+
+            # 중복 제거 및 가장 이른 날짜 추적
+            earliest_date_str: Optional[str] = None
+            new_count = 0
+            for item in data:
+                dt_str = item.get("xymd", "")
+                if dt_str and dt_str not in seen_dates:
+                    seen_dates.add(dt_str)
+                    all_data.append(item)
+                    new_count += 1
+                    if earliest_date_str is None or dt_str < earliest_date_str:
+                        earliest_date_str = dt_str
+
+            if not earliest_date_str or new_count == 0:
                 break
-            
-            tr_cont = "N"
+
+            # start_date에 도달했으면 종료
+            if start_str and earliest_date_str <= start_str:
+                break
+
+            # 다음 페이지: 가장 이른 날짜 이전으로 이동
+            earliest_dt = datetime.strptime(earliest_date_str, "%Y%m%d").date()
+            current_bymd = (earliest_dt - timedelta(days=1)).strftime("%Y%m%d")
             self._auth.smart_sleep()
-        
+
         # Bar 객체로 변환
         bars = []
         for row in all_data:
@@ -439,9 +452,15 @@ class KISDataProvider:
             except (ValueError, TypeError) as e:
                 logger.warning(f"해외주식 파싱 오류: {e}")
                 continue
-        
+
+        # 날짜 범위 필터링
+        if start_date:
+            bars = [b for b in bars if b.time.date() >= start_date]
+        if end_date:
+            bars = [b for b in bars if b.time.date() <= end_date]
+
         bars.sort(key=lambda b: b.time)
-        logger.info(f"해외주식 일봉 완료: {symbol}, {len(bars)}건")
+        logger.info(f"해외주식 일봉 완료: {symbol} ({kis_excd}), {len(bars)}건")
         return bars
 
     # ============================================

@@ -2,13 +2,21 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { TrendingUp, Settings } from "lucide-react";
+import { usePathname } from "next/navigation";
+import { TrendingUp, Settings, Bell, BarChart3 } from "lucide-react";
 import { SettingsModal } from "@/components/settings";
 import { useAuth } from "@/hooks";
+import { cn } from "@/lib/utils";
+
+const NAV_LINKS = [
+  { href: "/backtest", label: "백테스트", Icon: BarChart3 },
+  { href: "/signal", label: "신호 알림", Icon: Bell },
+];
 
 export function Header() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const { status } = useAuth();
+  const pathname = usePathname();
 
   const badgeLabel = !status.authenticated
     ? "미인증"
@@ -41,6 +49,25 @@ export function Header() {
                 </p>
               </div>
             </Link>
+
+            {/* 네비게이션 */}
+            <nav className="hidden sm:flex items-center gap-1">
+              {NAV_LINKS.map(({ href, label, Icon }) => (
+                <Link
+                  key={href}
+                  href={href}
+                  className={cn(
+                    "flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors",
+                    pathname === href || pathname.startsWith(href + "/")
+                      ? "bg-slate-100 dark:bg-slate-800 text-slate-900 dark:text-white"
+                      : "text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800/60",
+                  )}
+                >
+                  <Icon className="w-4 h-4" />
+                  {label}
+                </Link>
+              ))}
+            </nav>
 
             {/* 우측: 인증 배지 + 설정 버튼 */}
             <div className="flex items-center gap-2">

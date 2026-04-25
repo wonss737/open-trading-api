@@ -5,3 +5,4 @@ export * from "./backtest";
 export * from "./symbols";
 export * from "./auth";
 export * from "./market_leaders";
+export * from "./signals";
