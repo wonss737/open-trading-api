@@ -104,6 +104,7 @@ export function MarketLeadersPanel({ selectedStocks, onAddStocks, onRemoveStocks
         setStatus((prev) => ({ ...prev, [market]: s }));
         if (!s.is_updating) {
           clearInterval(interval);
+          setUpdateMessage(null);
           await loadData(market);
         }
       } catch {
@@ -141,8 +142,13 @@ export function MarketLeadersPanel({ selectedStocks, onAddStocks, onRemoveStocks
         amount_limit: amountLimit,
         force: forceUpdate,
       });
-      setUpdateMessage(res.message);
-      setStatus((prev) => ({ ...prev, [market]: prev[market] ? { ...prev[market]!, is_updating: true } : null }));
+      if (res.status === "skipped") {
+        setUpdateMessage(res.message);
+        setTimeout(() => setUpdateMessage(null), 5000);
+      } else {
+        setUpdateMessage(null);
+        setStatus((prev) => ({ ...prev, [market]: prev[market] ? { ...prev[market]!, is_updating: true } : null }));
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : "업데이트 실패";
       setError(msg.includes("401") ? "KIS API 인증 후 업데이트를 실행하세요." : msg);
@@ -340,14 +346,17 @@ export function MarketLeadersPanel({ selectedStocks, onAddStocks, onRemoveStocks
       </div>
 
       {/* 업데이트 진행 메시지 */}
-      {(updateMessage || currentStatus?.is_updating) && (
+      {currentStatus?.is_updating && (
         <div className="flex items-center gap-2 px-3 py-2 text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg">
           <Loader2 className="w-3 h-3 animate-spin flex-shrink-0" />
-          {currentStatus?.is_updating
-            ? market === "kr"
-              ? "업데이트 중... (KIS API 매출 조회 포함, 수 분 소요)"
-              : "업데이트 중... (NYS·NAS·AMS 시세 + yfinance 매출 조회, 수 분 소요)"
-            : updateMessage}
+          {market === "kr"
+            ? "업데이트 중... (KIS API 매출 조회 포함, 수 분 소요)"
+            : "업데이트 중... (NYS·NAS·AMS 시세 + yfinance 매출 조회, 수 분 소요)"}
+        </div>
+      )}
+      {updateMessage && !currentStatus?.is_updating && (
+        <div className="flex items-center gap-2 px-3 py-2 text-xs text-slate-600 dark:text-slate-400 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg">
+          {updateMessage}
         </div>
       )}
 

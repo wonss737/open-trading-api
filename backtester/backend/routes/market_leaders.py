@@ -292,8 +292,9 @@ def _fetch_kr_revenue_for_stock(code: str) -> Optional[int]:
     return _fetch_kr_revenue_yfinance(code)
 
 
-# KIS FHKST66430200 sale_account 단위: 백만원 / yfinance totalRevenue 단위: 원
-_YF_KR_REVENUE_SCALE = 1_000_000
+# KIS FHKST66430200 sale_account 단위: 억원 / yfinance totalRevenue 단위: 원(KRW)
+# 1억원 = 100,000,000원 → yfinance 원 단위를 억원으로 변환
+_YF_KR_REVENUE_SCALE = 100_000_000
 
 
 def _fetch_kr_revenue_yfinance(code: str) -> Optional[int]:
