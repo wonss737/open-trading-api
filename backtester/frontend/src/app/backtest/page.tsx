@@ -774,11 +774,13 @@ export default function BacktestPage() {
                 const buyQueues: Record<string, typeof result.trades> = {};
                 const paired: {
                   symbol: string;
+                  currency: "KRW" | "USD";
                   buyDate: string; buyPrice: number;
                   sellDate: string | null; sellPrice: number | null;
                   returnPct: number | null;
                 }[] = [];
                 for (const t of result.trades) {
+                  const currency = t.currency ?? "KRW";
                   if (t.direction === "Buy") {
                     if (!buyQueues[t.symbol]) buyQueues[t.symbol] = [];
                     buyQueues[t.symbol].push(t);
@@ -786,16 +788,16 @@ export default function BacktestPage() {
                     const buyTrade = buyQueues[t.symbol]?.shift();
                     if (buyTrade) {
                       const ret = ((t.price - buyTrade.price) / buyTrade.price) * 100;
-                      paired.push({ symbol: t.symbol, buyDate: buyTrade.time, buyPrice: buyTrade.price, sellDate: t.time, sellPrice: t.price, returnPct: ret });
+                      paired.push({ symbol: t.symbol, currency, buyDate: buyTrade.time, buyPrice: buyTrade.price, sellDate: t.time, sellPrice: t.price, returnPct: ret });
                     } else {
-                      paired.push({ symbol: t.symbol, buyDate: "", buyPrice: 0, sellDate: t.time, sellPrice: t.price, returnPct: null });
+                      paired.push({ symbol: t.symbol, currency, buyDate: "", buyPrice: 0, sellDate: t.time, sellPrice: t.price, returnPct: null });
                     }
                   }
                 }
                 // 미체결 매수 추가
                 for (const [sym, queue] of Object.entries(buyQueues)) {
                   for (const b of queue) {
-                    paired.push({ symbol: sym, buyDate: b.time, buyPrice: b.price, sellDate: null, sellPrice: null, returnPct: null });
+                    paired.push({ symbol: sym, currency: b.currency ?? "KRW", buyDate: b.time, buyPrice: b.price, sellDate: null, sellPrice: null, returnPct: null });
                   }
                 }
                 return (
@@ -832,13 +834,21 @@ export default function BacktestPage() {
                                   {row.buyDate ? new Date(row.buyDate).toLocaleDateString("ko-KR") : "-"}
                                 </td>
                                 <td className="py-1.5 pr-4 text-right font-mono text-xs whitespace-nowrap">
-                                  {row.buyPrice ? Math.round(row.buyPrice).toLocaleString() + "원" : "-"}
+                                  {row.buyPrice
+                                    ? row.currency === "USD"
+                                      ? "$" + row.buyPrice.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                                      : Math.round(row.buyPrice).toLocaleString() + "원"
+                                    : "-"}
                                 </td>
                                 <td className="py-1.5 pr-4 text-slate-500 dark:text-slate-400 text-xs whitespace-nowrap">
                                   {row.sellDate ? new Date(row.sellDate).toLocaleDateString("ko-KR") : <span className="text-amber-500">보유중</span>}
                                 </td>
                                 <td className="py-1.5 pr-4 text-right font-mono text-xs whitespace-nowrap">
-                                  {row.sellPrice ? Math.round(row.sellPrice).toLocaleString() + "원" : "-"}
+                                  {row.sellPrice
+                                    ? row.currency === "USD"
+                                      ? "$" + row.sellPrice.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                                      : Math.round(row.sellPrice).toLocaleString() + "원"
+                                    : "-"}
                                 </td>
                                 <td className={cn("py-1.5 text-right font-medium text-xs whitespace-nowrap",
                                   row.returnPct === null ? "text-slate-400" :

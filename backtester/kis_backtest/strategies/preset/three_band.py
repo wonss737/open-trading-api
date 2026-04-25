@@ -25,6 +25,7 @@ from kis_backtest.dsl.helpers import SMA, ATR, BB
     category="volatility",
     description=(
         "볼린저밴드 상단이 엔벨로프 상단 위에 있고 가격이 엔벨로프 상단을 상향돌파 시 매수, "
+        "또는 볼린저밴드 상단이 엔벨로프 상단을 상향돌파 시 가격이 이미 엔벨로프 상단 위에 있을 때 매수, "
         "Envelope 상단 또는 STARC 상단 하향돌파 시 매도"
     ),
     tags=["bollinger", "envelope", "starc", "band", "three_band"],
@@ -42,9 +43,11 @@ class ThreeBandStrategy(BaseStrategy):
         starc_constant: STARC 상단 배수 (default: 2.0)
         stop_loss_pct: 손절 비율 % (default: 5.0)
 
-    Entry Condition (매수):
-        BBandsUp > EnvelopeUp AND price crosses above EnvelopeUp
-        → 볼린저밴드 상단 > 엔벨로프 상단이고 가격이 엔벨로프 상단을 위로 돌파
+    Entry Condition (매수) — 둘 중 하나 충족 시:
+        [A] BBandsUp > EnvelopeUp AND price crosses above EnvelopeUp
+            → 볼린저밴드 상단이 이미 엔벨로프 상단 위에 있고, 가격이 엔벨로프 상단을 위로 돌파
+        [B] BBandsUp crosses above EnvelopeUp AND price > EnvelopeUp
+            → 볼린저밴드 상단이 엔벨로프 상단을 돌파하는 순간, 가격이 이미 엔벨로프 상단 위에 있음
 
     Exit Condition (매도):
         price crosses below EnvelopeUpper OR price crosses below StarcUpper
@@ -162,14 +165,23 @@ class ThreeBandStrategy(BaseStrategy):
             prev_price_tb = self.prev_values[symbol].get('price', price)
             prev_env_upper = self.prev_values[symbol].get('env_upper', env_upper)
             prev_starc_upper = self.prev_values[symbol].get('starc_upper', starc_upper)
+            prev_bb_upper = self.prev_values[symbol].get('bb_upper', bb_upper_val)
 
-            # 매수: BB상단 > Envelope상단  AND  가격이 Envelope상단을 상향 돌파
-            three_band_entry = 1.0 if (
+            # 매수 [A]: BB상단 > Env상단  AND  가격이 Env상단을 상향 돌파
+            entry_a = (
                 env_upper > 0 and
                 bb_upper_val > env_upper and
                 prev_price_tb <= prev_env_upper and
                 price > env_upper
-            ) else 0.0
+            )
+            # 매수 [B]: BB상단이 Env상단을 상향 돌파하는 순간, 가격이 이미 Env상단 위에 있는 경우
+            entry_b = (
+                env_upper > 0 and
+                prev_bb_upper <= prev_env_upper and
+                bb_upper_val > env_upper and
+                price > env_upper
+            )
+            three_band_entry = 1.0 if (entry_a or entry_b) else 0.0
 
             # 매도: Envelope 상단 하향 돌파 OR STARC 상단 하향 돌파
             env_cross_below = (
@@ -186,7 +198,8 @@ class ThreeBandStrategy(BaseStrategy):
 
             # 다음 봉 비교를 위해 저장
             self.prev_values[symbol]['env_upper'] = env_upper
-            self.prev_values[symbol]['starc_upper'] = starc_upper'''
+            self.prev_values[symbol]['starc_upper'] = starc_upper
+            self.prev_values[symbol]['bb_upper'] = bb_upper_val'''
 
     def build(self) -> StrategyDefinition:
         return StrategyDefinition(

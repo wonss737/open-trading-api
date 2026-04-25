@@ -115,6 +115,20 @@ export function MarketLeadersPanel({ selectedStocks, onAddStocks, onRemoveStocks
   }, [status, market, loadData]);
 
   const handleMarketChange = (m: MarketType) => {
+    // 반대 마켓에서 추가된 종목 제거
+    const prevMarket = market;
+    if (prevMarket !== m) {
+      const prevItems = items[prevMarket];
+      const prevAllCodes = new Set<string>([
+        ...prevItems.market_cap.map((i) => i.code),
+        ...prevItems.trading_amount.map((i) => i.code),
+        ...prevItems.revenue.map((i) => i.code),
+      ]);
+      const toRemove = selectedStocks.filter((c) => prevAllCodes.has(c));
+      if (toRemove.length > 0) {
+        onRemoveStocks(toRemove);
+      }
+    }
     setMarket(m);
     setActiveFilters(new Set());
     setError(null);
@@ -323,6 +337,7 @@ export function MarketLeadersPanel({ selectedStocks, onAddStocks, onRemoveStocks
       <div className="flex gap-1 p-1 bg-slate-100 dark:bg-slate-800 rounded-lg">
         <button
           onClick={() => handleMarketChange("kr")}
+          title={market === "us" ? "미국 탭에서 추가된 종목이 삭제됩니다" : undefined}
           className={cn(
             "flex-1 py-1.5 text-xs font-semibold rounded-md transition-colors",
             market === "kr"
@@ -334,6 +349,7 @@ export function MarketLeadersPanel({ selectedStocks, onAddStocks, onRemoveStocks
         </button>
         <button
           onClick={() => handleMarketChange("us")}
+          title={market === "kr" ? "한국 탭에서 추가된 종목이 삭제됩니다" : undefined}
           className={cn(
             "flex-1 py-1.5 text-xs font-semibold rounded-md transition-colors",
             market === "us"

@@ -184,6 +184,7 @@ def _lean_run_to_api_response(
             "quantity": abs(order.get("quantity", 0)),
             "price": order.get("price", 0),
             "time": order.get("time", ""),
+            "currency": "USD" if _is_us_symbol(symbol_code) else "KRW",
         })
 
     return {

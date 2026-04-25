@@ -77,6 +77,7 @@ export interface TradeInfo {
   quantity: number;
   price: number;
   time: string;
+  currency?: "KRW" | "USD";  // 거래 통화 (기본값: KRW)
   profit?: number;
   profit_percent?: number;
 }
