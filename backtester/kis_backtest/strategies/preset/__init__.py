@@ -38,6 +38,12 @@ from kis_backtest.strategies.preset.short_term_reversal import ShortTermReversal
 # 10. 추세 필터 + 시그널
 from kis_backtest.strategies.preset.trend_filter_signal import TrendFilterSignalStrategy
 
+# 11. MACD-시그널 골든/데드 크로스
+from kis_backtest.strategies.preset.macd_signal import MACDSignalStrategy
+
+# 12. 삼중밴드 전략
+from kis_backtest.strategies.preset.three_band import ThreeBandStrategy
+
 
 __all__ = [
     "SMACrossoverStrategy",
@@ -50,4 +56,6 @@ __all__ = [
     "VolatilityBreakoutStrategy",
     "ShortTermReversalStrategy",
     "TrendFilterSignalStrategy",
+    "MACDSignalStrategy",
+    "ThreeBandStrategy",
 ]

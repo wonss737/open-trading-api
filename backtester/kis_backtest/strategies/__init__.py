@@ -18,6 +18,8 @@ from kis_backtest.strategies.preset import (
     VolatilityBreakoutStrategy,
     ShortTermReversalStrategy,
     TrendFilterSignalStrategy,
+    MACDSignalStrategy,
+    ThreeBandStrategy,
 )
 
 # Re-export DSL components from dsl module
@@ -113,4 +115,6 @@ __all__ = [
     "VolatilityBreakoutStrategy",
     "ShortTermReversalStrategy",
     "TrendFilterSignalStrategy",
+    "MACDSignalStrategy",
+    "ThreeBandStrategy",
 ]

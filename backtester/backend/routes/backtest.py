@@ -4,7 +4,9 @@ Lean Docker 기반 백테스트 실행.
 """
 
 import asyncio
+import csv
 import logging
+import re
 import uuid
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -327,6 +329,111 @@ def _classify_lean_error(error: str, output: str) -> str:
     return f"백테스트 실패: {error}"
 
 
+def _is_us_symbol(symbol: str) -> bool:
+    """True if symbol is a US stock ticker (alphabetic), False for Korean 6-digit codes."""
+    if re.match(r'^\d{6}$', symbol):
+        return False
+    if re.match(r'^[A-Za-z][A-Za-z0-9.]{0,4}$', symbol):
+        return True
+    return False
+
+
+def _save_backtest_csv(
+    result_data: Dict[str, Any],
+    output_dir: Path,
+    buy_signal: str,
+    sell_signal: str,
+) -> None:
+    """백테스트 결과와 거래 내역을 CSV로 저장.
+
+    Args:
+        result_data: _lean_run_to_api_response 반환값
+        output_dir: CSV 저장 디렉토리
+        buy_signal: 매수 방식 (영어)
+        sell_signal: 매도 방식 (영어)
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    base_name = f"{buy_signal}__{sell_signal}"
+    metrics_path = output_dir / f"{base_name}.csv"
+    trades_path = output_dir / f"{base_name}_trades.csv"
+
+    metrics = result_data.get("metrics", {})
+
+    # 지표 CSV 저장 (단일 행)
+    rows = {
+        "전략명": result_data.get("strategy_name", ""),
+        "시작일": result_data.get("start_date", ""),
+        "종료일": result_data.get("end_date", ""),
+        "초기자본": result_data.get("initial_capital", 0),
+        "최종자본": result_data.get("final_capital", 0),
+        "순이익": result_data.get("net_profit", 0),
+        "총 수익률": metrics.get("basic", {}).get("total_return", 0),
+        "CAGR": metrics.get("basic", {}).get("annual_return", 0),
+        "최대 낙폭": metrics.get("basic", {}).get("max_drawdown", 0),
+        "샤프 비율": metrics.get("risk", {}).get("sharpe_ratio", 0),
+        "소르티노 비율": metrics.get("risk", {}).get("sortino_ratio", 0),
+        "확률적 샤프": metrics.get("risk", {}).get("probabilistic_sharpe", 0),
+        "알파": metrics.get("greeks", {}).get("alpha", 0),
+        "베타": metrics.get("greeks", {}).get("beta", 0),
+        "연간 표준편차": metrics.get("volatility", {}).get("annual_std_dev", 0),
+        "연간 분산": metrics.get("volatility", {}).get("annual_variance", 0),
+        "정보 비율": metrics.get("benchmark", {}).get("information_ratio", 0),
+        "추적 오차": metrics.get("benchmark", {}).get("tracking_error", 0),
+        "트레이너 비율": metrics.get("benchmark", {}).get("treynor_ratio", 0),
+        "체결 거래": metrics.get("trading", {}).get("total_orders", 0),
+        "승률": metrics.get("trading", {}).get("win_rate", 0),
+        "평균 수익": metrics.get("trading", {}).get("avg_win", 0),
+        "평균 손실": metrics.get("trading", {}).get("avg_loss", 0),
+        "손익비": metrics.get("trading", {}).get("profit_loss_ratio", 0),
+        "기대값": metrics.get("trading", {}).get("expectancy", 0),
+        "총 수수료": metrics.get("other", {}).get("total_fees", 0),
+        "회전율": metrics.get("other", {}).get("portfolio_turnover", 0),
+        "낙폭 회복": metrics.get("other", {}).get("drawdown_recovery", 0),
+    }
+
+    with open(metrics_path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows.keys()))
+        writer.writeheader()
+        writer.writerow(rows)
+
+    # 거래 내역 CSV 저장
+    trades = result_data.get("trades", [])
+    buys: Dict[str, Dict] = {}  # symbol → buy trade
+    trade_records = []
+
+    for t in trades:
+        sym = t.get("symbol", "")
+        direction = t.get("direction", "")
+        if direction == "Buy":
+            buys[sym] = t
+        elif direction == "Sell" and sym in buys:
+            buy_t = buys.pop(sym)
+            buy_price = float(buy_t.get("price", 0))
+            sell_price = float(t.get("price", 0))
+            pct = ((sell_price - buy_price) / buy_price * 100) if buy_price > 0 else 0
+            trade_records.append({
+                "주식 코드": sym,
+                "주식 이름": sym,
+                "매수 날짜": buy_t.get("time", ""),
+                "매수 금액": buy_price,
+                "매도 날짜": t.get("time", ""),
+                "매도 금액": sell_price,
+                "수익률 (%)": round(pct, 4),
+            })
+
+    if trade_records:
+        with open(trades_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=list(trade_records[0].keys()))
+            writer.writeheader()
+            writer.writerows(trade_records)
+    else:
+        with open(trades_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=["주식 코드", "주식 이름", "매수 날짜", "매수 금액", "매도 날짜", "매도 금액", "수익률 (%)"])
+            writer.writeheader()
+
+    logger.info(f"[CSV] 결과 저장: {metrics_path}, {trades_path}")
+
+
 async def prepare_market_data(
     symbols: List[str],
     start_date: str,
@@ -334,22 +441,34 @@ async def prepare_market_data(
     workspace: Path,
 ) -> dict:
     """백테스트용 시장 데이터 준비 (KIS API → Lean CSV)
-    
+
+    국내(KRX)와 해외(US) 주식 모두 지원.
+    심볼이 영문 1~5자인 경우 미국 주식으로 자동 판별합니다.
+
     Returns:
-        {"downloaded": [...], "skipped": [...], "errors": [...]}
+        {"downloaded": [...], "skipped": [...], "errors": [...], "market": "krx"|"us"}
     """
     from kis_backtest.providers.kis.auth import KISAuth
     from kis_backtest.providers.kis.data import KISDataProvider
-    
-    output_dir = workspace / "data" / "equity" / "krx" / "daily"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    result = {"downloaded": [], "skipped": [], "errors": []}
-    
-    # 요청 날짜 파싱
+
     req_start = datetime.strptime(start_date, "%Y-%m-%d").date()
     req_end = datetime.strptime(end_date, "%Y-%m-%d").date()
-    
+
+    # 미국/국내 심볼 분류
+    us_symbols = [s for s in symbols if _is_us_symbol(s)]
+    kr_symbols = [s for s in symbols if not _is_us_symbol(s)]
+    detected_market = "us" if us_symbols and not kr_symbols else "krx"
+
+    def _output_dir(symbol: str) -> Path:
+        if _is_us_symbol(symbol):
+            return workspace / "data" / "equity" / "usa" / "daily"
+        return workspace / "data" / "equity" / "krx" / "daily"
+
+    for sym in symbols:
+        _output_dir(sym).mkdir(parents=True, exist_ok=True)
+
+    result: dict = {"downloaded": [], "skipped": [], "errors": [], "market": detected_market}
+
     def check_date_coverage(csv_path: Path) -> bool:
         """CSV 파일이 요청 날짜 범위를 커버하는지 확인 (관대한 체크)
 
@@ -364,38 +483,30 @@ async def prepare_market_data(
                 if len(lines) < 2:
                     return False
 
-                # 첫번째/마지막 줄에서 날짜 추출 (YYYYMMDD 형식)
                 first_date_str = lines[0].split(',')[0].strip()
                 last_date_str = lines[-1].split(',')[0].strip()
 
                 first_date = datetime.strptime(first_date_str, "%Y%m%d").date()
                 last_date = datetime.strptime(last_date_str, "%Y%m%d").date()
 
-                # 관대한 날짜 체크
-                tolerance_days = 7  # 주말 포함 약 5 영업일
-                coverage_threshold = 0.85  # 85% 이상 커버 시 캐시 사용
+                tolerance_days = 7
+                coverage_threshold = 0.85
 
-                # 1. 종료일 체크: tolerance_days 허용
                 if req_end > last_date + timedelta(days=tolerance_days):
                     logger.info(f"[Data] 종료일 초과: 요청={req_end}, 데이터={last_date} (허용={tolerance_days}일)")
                     return False
 
-                # 2. 시작일 체크: 데이터 시작 후면 OK (너무 이전 데이터 요청 시만 실패)
-                # 요청 시작일이 데이터보다 30일 이상 앞서면 재다운로드
                 if req_start < first_date - timedelta(days=30):
                     logger.info(f"[Data] 시작일 부족: 요청={req_start}, 데이터 시작={first_date}")
                     return False
 
-                # 3. 커버리지 체크
                 req_days = (req_end - req_start).days
                 if req_days <= 0:
-                    return True  # 당일 요청
+                    return True
 
-                # 실제 커버 가능한 범위 계산
                 effective_start = max(req_start, first_date)
                 effective_end = min(req_end, last_date)
                 covered_days = (effective_end - effective_start).days
-
                 coverage = covered_days / req_days if req_days > 0 else 1.0
 
                 if coverage < coverage_threshold:
@@ -408,25 +519,25 @@ async def prepare_market_data(
         except Exception as e:
             logger.warning(f"[Data] 날짜 체크 실패: {e}")
             return False
-    
-    # 이미 있는 파일 확인 - 날짜 범위도 체크
+
+    # 이미 있는 파일 확인
     for symbol in symbols:
-        csv_path = output_dir / f"{symbol.lower()}.csv"
+        out_dir = _output_dir(symbol)
+        csv_path = out_dir / f"{symbol.lower()}.csv"
         if csv_path.exists() and csv_path.stat().st_size > 100:
             if check_date_coverage(csv_path):
                 result["skipped"].append(symbol)
                 continue
             else:
-                # 날짜 범위 불일치 - 파일 삭제 후 재다운로드
                 logger.info(f"[Data] {symbol} 날짜 범위 불일치로 재다운로드")
                 csv_path.unlink()
-    
+
     symbols_to_download = [s for s in symbols if s not in result["skipped"]]
-    
+
     if not symbols_to_download:
         logger.info("[Data] 모든 종목 데이터 캐시 사용")
         return result
-    
+
     # KIS 인증
     try:
         auth = KISAuth.from_env()
@@ -436,25 +547,34 @@ async def prepare_market_data(
         for s in symbols_to_download:
             result["errors"].append({"symbol": s, "error": str(e)})
         return result
-    
+
     # 데이터 다운로드
     for symbol in symbols_to_download:
+        out_dir = _output_dir(symbol)
         try:
-            logger.info(f"[Data] 다운로드 중: {symbol}")
-            bars = provider.get_history(symbol, req_start, req_end)
-            
+            logger.info(f"[Data] 다운로드 중: {symbol} (market={'us' if _is_us_symbol(symbol) else 'krx'})")
+
+            if _is_us_symbol(symbol):
+                # 해외주식: get_overseas_daily 사용 (기본 거래소: NASDAQ)
+                bars = provider.get_overseas_daily(symbol, exchange="nasdaq", end_date=req_end)
+                # 요청 기간만 필터링
+                bars = [b for b in bars if req_start <= b.time.date() <= req_end]
+                market_type = "us"
+            else:
+                bars = provider.get_history(symbol, req_start, req_end)
+                market_type = "krx"
+
             if bars:
-                # Lean CSV 변환
-                DataConverter.bars_to_lean_csv(bars, symbol, output_dir)
+                DataConverter.bars_to_lean_csv(bars, symbol, out_dir, market_type=market_type)
                 result["downloaded"].append(symbol)
                 logger.info(f"[Data] 완료: {symbol} ({len(bars)} bars)")
             else:
                 result["errors"].append({"symbol": symbol, "error": "데이터 없음"})
-                
+
         except Exception as e:
             logger.error(f"[Data] {symbol} 다운로드 실패: {e}")
             result["errors"].append({"symbol": symbol, "error": str(e)})
-    
+
     return result
 
 
@@ -551,14 +671,22 @@ async def _run_backtest_job(job: BacktestJobState, request: BacktestRequest) -> 
     job.status = JobStatus.RUNNING
     strategy_id = request.strategy_id
     try:
-        # 전략 빌드
-        try:
-            if request.param_overrides:
-                definition = StrategyRegistry.build_with_params(strategy_id, **request.param_overrides)
-            else:
-                definition = StrategyRegistry.build(strategy_id)
-        except KeyError:
+        # 전략 인스턴스 생성 (get_custom_lean_code 활성화를 위해 인스턴스 사용)
+        strategy_cls = StrategyRegistry.get(strategy_id)
+        if strategy_cls is None:
             raise RuntimeError(f"Strategy not found: {strategy_id}")
+
+        valid_params: Dict[str, Any] = {}
+        if request.param_overrides:
+            if hasattr(strategy_cls, 'PARAM_DEFINITIONS') and strategy_cls.PARAM_DEFINITIONS:
+                for name in strategy_cls.PARAM_DEFINITIONS:
+                    if name in request.param_overrides:
+                        valid_params[name] = request.param_overrides[name]
+            else:
+                valid_params = dict(request.param_overrides)
+
+        strategy_instance = strategy_cls(**valid_params)
+        definition = strategy_instance.build()
 
         start_date = request.start_date
         end_date = request.end_date
@@ -575,7 +703,7 @@ async def _run_backtest_job(job: BacktestJobState, request: BacktestRequest) -> 
             f"| {start_date} ~ {end_date}"
         )
 
-        # 시장 데이터
+        # 시장 데이터 (국내/해외 자동 감지)
         data_result = await prepare_market_data(
             symbols=request.symbols, start_date=start_date,
             end_date=end_date, workspace=workspace,
@@ -583,22 +711,26 @@ async def _run_backtest_job(job: BacktestJobState, request: BacktestRequest) -> 
         logger.info(f"[Job {job.job_id}] 데이터: {data_result}")
         if data_result["errors"] and not data_result["downloaded"] and not data_result["skipped"]:
             error_msg = data_result["errors"][0]["error"] if data_result["errors"] else "데이터 다운로드 실패"
-            raise RuntimeError(f"데이터 준비 실패: {error_msg}")
+            raise RuntimeError(f"데이터 준비 실패: {error_msg}\n\n• 종목 코드가 올바른지 확인하세요 (국내: 005930, 미국: AAPL)\n• 백테스트 기간에 거래일이 포함되어 있는지 확인하세요\n• KIS API 환경설정(.env)을 확인하세요")
 
-        # 벤치마크
-        try:
-            await prepare_benchmark_data(start_date=start_date, end_date=end_date, workspace=workspace)
-        except Exception as e:
-            logger.warning(f"[Job {job.job_id}] 벤치마크 준비 실패 (무시): {e}")
+        detected_market = data_result.get("market", "krx")
 
-        # 코드 생성
+        # 벤치마크 (KRX만 해당)
+        if detected_market == "krx":
+            try:
+                await prepare_benchmark_data(start_date=start_date, end_date=end_date, workspace=workspace)
+            except Exception as e:
+                logger.warning(f"[Job {job.job_id}] 벤치마크 준비 실패 (무시): {e}")
+
+        # 코드 생성 — strategy_instance를 전달하여 get_custom_lean_code() 활성화
         config = CodeGenConfig(
+            market=detected_market,
             commission_rate=request.commission_rate or 0.00015,
             tax_rate=request.tax_rate or 0.002,
             slippage=request.slippage or 0.0,
             initial_capital=request.initial_capital,
         )
-        code = LeanCodeGenerator(definition, config=config).generate(
+        code = LeanCodeGenerator(strategy_instance, config=config).generate(
             symbols=request.symbols, start_date=start_date,
             end_date=end_date, initial_capital=request.initial_capital,
         )
@@ -632,6 +764,16 @@ async def _run_backtest_job(job: BacktestJobState, request: BacktestRequest) -> 
             job.result = result_data
             job.status = JobStatus.COMPLETED
             logger.info(f"[Job {job.job_id}] 완료")
+
+            # CSV 저장
+            try:
+                buy_signal = getattr(strategy_instance, 'buy_signal_name', strategy_id)
+                sell_signal = getattr(strategy_instance, 'sell_signal_name', strategy_id)
+                csv_dir = workspace / "results" / strategy_id
+                _save_backtest_csv(result_data, csv_dir, buy_signal, sell_signal)
+            except Exception as csv_err:
+                logger.warning(f"[Job {job.job_id}] CSV 저장 실패 (무시): {csv_err}")
+
         else:
             error = lean_run.error or "Unknown error"
             lean_log_tail = (lean_run.output or "")[-2000:]
@@ -710,7 +852,7 @@ async def _run_custom_backtest_job(job: BacktestJobState, request: CustomBacktes
             f"| {request.start_date} ~ {request.end_date}"
         )
 
-        # 시장 데이터
+        # 시장 데이터 (국내/해외 자동 감지)
         data_result = await prepare_market_data(
             symbols=request.symbols, start_date=request.start_date,
             end_date=request.end_date, workspace=workspace,
@@ -718,18 +860,22 @@ async def _run_custom_backtest_job(job: BacktestJobState, request: CustomBacktes
         logger.info(f"[Job {job.job_id}] 데이터: {data_result}")
         if data_result["errors"] and not data_result["downloaded"] and not data_result["skipped"]:
             error_msg = data_result["errors"][0]["error"] if data_result["errors"] else "데이터 다운로드 실패"
-            raise RuntimeError(f"데이터 준비 실패: {error_msg}")
+            raise RuntimeError(f"데이터 준비 실패: {error_msg}\n\n• 종목 코드가 올바른지 확인하세요 (국내: 005930, 미국: AAPL)\n• 백테스트 기간에 거래일이 포함되어 있는지 확인하세요\n• KIS API 환경설정(.env)을 확인하세요")
 
-        # 벤치마크
-        try:
-            await prepare_benchmark_data(
-                start_date=request.start_date, end_date=request.end_date, workspace=workspace
-            )
-        except Exception as e:
-            logger.warning(f"[Job {job.job_id}] 벤치마크 준비 실패 (무시): {e}")
+        detected_market = data_result.get("market", "krx")
+
+        # 벤치마크 (KRX만 해당)
+        if detected_market == "krx":
+            try:
+                await prepare_benchmark_data(
+                    start_date=request.start_date, end_date=request.end_date, workspace=workspace
+                )
+            except Exception as e:
+                logger.warning(f"[Job {job.job_id}] 벤치마크 준비 실패 (무시): {e}")
 
         # 코드 생성
         config = CodeGenConfig(
+            market=detected_market,
             commission_rate=request.commission_rate or 0.00015,
             tax_rate=request.tax_rate or 0.002,
             slippage=request.slippage or 0.0,
