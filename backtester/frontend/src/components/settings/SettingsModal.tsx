@@ -21,6 +21,11 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const [mlStatus, setMlStatus] = useState<MarketLeadersStatus | null>(null);
   const [isUpdatingML, setIsUpdatingML] = useState(false);
   const [mlUpdateMsg, setMlUpdateMsg] = useState<string | null>(null);
+  const [mlMarket, setMlMarket] = useState<"kr" | "us">("kr");
+  const [mlCapLimit, setMlCapLimit] = useState(75);
+  const [mlRevenueLimit, setMlRevenueLimit] = useState(75);
+  const [mlAmountLimit, setMlAmountLimit] = useState(150);
+  const [mlForceUpdate, setMlForceUpdate] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
@@ -66,9 +71,30 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     setIsUpdatingML(true);
     setMlUpdateMsg(null);
     try {
-      const res = await triggerMarketLeadersUpdate();
+      const res = await triggerMarketLeadersUpdate({
+        market: mlMarket,
+        cap_limit: mlCapLimit,
+        revenue_limit: mlRevenueLimit,
+        amount_limit: mlAmountLimit,
+        force: mlForceUpdate,
+      });
       setMlUpdateMsg(res.message);
-      setMlStatus((prev) => prev ? { ...prev, is_updating: true } : prev);
+      if (res.status === "started") {
+        setMlStatus((prev) => prev ? { ...prev, is_updating: true } : prev);
+        // 완료될 때까지 폴링
+        const interval = setInterval(async () => {
+          try {
+            const s = await getMarketLeadersStatus(mlMarket);
+            setMlStatus(s);
+            if (!s.is_updating) {
+              clearInterval(interval);
+              setMlUpdateMsg("업데이트가 완료되었습니다.");
+            }
+          } catch {
+            clearInterval(interval);
+          }
+        }, 5000);
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : "업데이트 실패";
       setMlUpdateMsg(msg.includes("401") ? "KIS API 인증 후 업데이트를 실행하세요." : msg);
@@ -339,9 +365,70 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
             </div>
             <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-lg space-y-3">
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                시가총액 상위 150, 매출 상위 150, 거래대금 상위 300 기준으로 선정됩니다.
-                매일 업데이트가 필요하며 KIS API 인증 후 사용 가능합니다.
+                시가총액·매출·거래대금 기준으로 선도주를 선정합니다. 한국: KIS API, 미국: KIS+yfinance. 인증 후 사용 가능.
               </p>
+              {/* 시장 + limit 설정 */}
+              <div className="space-y-2">
+                {/* 시장 선택 */}
+                <div className="flex gap-1 p-0.5 bg-slate-200 dark:bg-slate-700 rounded-md">
+                  {(["kr", "us"] as const).map((m) => (
+                    <button
+                      key={m}
+                      onClick={() => setMlMarket(m)}
+                      className={`flex-1 py-1 text-xs rounded transition-colors ${
+                        mlMarket === m
+                          ? "bg-white dark:bg-slate-600 text-slate-900 dark:text-slate-100 font-medium shadow-sm"
+                          : "text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300"
+                      }`}
+                    >
+                      {m === "kr" ? "한국 (KR)" : "미국 (US)"}
+                    </button>
+                  ))}
+                </div>
+                {/* 순위 입력 */}
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="space-y-1">
+                    <label className="text-xs text-slate-500 dark:text-slate-400">시가총액</label>
+                    <input
+                      type="number" min={1} max={500}
+                      value={mlCapLimit}
+                      onChange={(e) => setMlCapLimit(Math.max(1, Math.min(500, Number(e.target.value))))}
+                      className="w-full px-2 py-1 text-xs border border-slate-300 dark:border-slate-600 rounded bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs text-slate-500 dark:text-slate-400">
+                      매출{mlMarket === "us" ? " (yfinance)" : ""}
+                    </label>
+                    <input
+                      type="number" min={1} max={500}
+                      value={mlRevenueLimit}
+                      onChange={(e) => setMlRevenueLimit(Math.max(1, Math.min(500, Number(e.target.value))))}
+                      className="w-full px-2 py-1 text-xs border border-slate-300 dark:border-slate-600 rounded bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs text-slate-500 dark:text-slate-400">거래대금</label>
+                    <input
+                      type="number" min={1} max={1000}
+                      value={mlAmountLimit}
+                      onChange={(e) => setMlAmountLimit(Math.max(1, Math.min(1000, Number(e.target.value))))}
+                      className="w-full px-2 py-1 text-xs border border-slate-300 dark:border-slate-600 rounded bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-amber-400"
+                    />
+                  </div>
+                </div>
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={mlForceUpdate}
+                    onChange={(e) => setMlForceUpdate(e.target.checked)}
+                    className="w-3.5 h-3.5 accent-amber-500"
+                  />
+                  <span className="text-xs text-slate-600 dark:text-slate-400">
+                    강제 업데이트 (오늘 이미 업데이트된 경우에도 재실행)
+                  </span>
+                </label>
+              </div>
               {mlStatus && (
                 <div className="space-y-1.5 text-sm">
                   <div className="flex justify-between">

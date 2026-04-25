@@ -103,6 +103,22 @@ export interface BacktestResponse {
   message?: string;
 }
 
+/** 잡 제출 직후 반환 */
+export interface JobSubmitResponse {
+  job_id: string;
+  status: string;
+}
+
+/** GET /api/backtest/jobs/{job_id} 응답 */
+export interface BacktestJobResponse {
+  job_id: string;
+  status: "pending" | "running" | "completed" | "failed";
+  result?: BacktestResult;
+  error?: string;
+  created_at: string;
+  finished_at?: string;
+}
+
 /**
  * 차트 데이터 포인트
  */

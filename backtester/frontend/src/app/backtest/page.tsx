@@ -76,7 +76,7 @@ function ParamSlider({
 }) {
   const step = definition.step ?? (definition.type === "int" ? 1 : 0.1);
   const label = definition.label || name.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
-  
+
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
@@ -155,6 +155,7 @@ export default function BacktestPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [importedYaml, setImportedYaml] = useState<string | null>(null);
   const [selectedStocks, setSelectedStocks] = useState<string[]>([]);
+  const [stockNames, setStockNames] = useState<Record<string, string>>({});
   const [startDate, setStartDate] = useState(() => {
     const d = new Date();
     d.setMonth(d.getMonth() - 6);
@@ -162,21 +163,21 @@ export default function BacktestPage() {
   });
   const [endDate, setEndDate] = useState(() => new Date().toISOString().split("T")[0]);
   const [initialCapital, setInitialCapital] = useState(100_000_000);
-  
+
   // 거래 비용 설정
   const [commissionRate, setCommissionRate] = useState(0.015); // 0.015%
   const [taxRate, setTaxRate] = useState(0.2); // 0.2%
   const [slippage, setSlippage] = useState(0.1); // 0.1%
-  
+
   // 파라미터 오버라이드 (전략 파라미터 조정용)
   const [paramOverrides, setParamOverrides] = useState<Record<string, number>>({});
-  
+
   // 선택된 전략 객체
   const selectedStrategy = useMemo(() => {
     if (!selectedId) return null;
     return allStrategies.find(s => s.id === selectedId) || null;
   }, [selectedId, allStrategies]);
-  
+
   // 전략 선택 시 기본 파라미터로 초기화
   useEffect(() => {
     if (selectedStrategy?.params) {
@@ -189,12 +190,12 @@ export default function BacktestPage() {
       setParamOverrides({});
     }
   }, [selectedStrategy]);
-  
+
   // 파라미터 변경 핸들러
   const handleParamChange = useCallback((name: string, value: number) => {
     setParamOverrides(prev => ({ ...prev, [name]: value }));
   }, []);
-  
+
   // 결과
   const [isRunning, setIsRunning] = useState(false);
   const [loadingStep, setLoadingStep] = useState(0);
@@ -463,7 +464,7 @@ export default function BacktestPage() {
                 Import된 파일 사용 중
               </div>
             )}
-            
+
             {/* 전략 설명 */}
             {selectedStrategy && (
               <p className="mt-2 text-xs text-slate-500">
@@ -499,7 +500,7 @@ export default function BacktestPage() {
               <Target className="w-4 h-4 text-kis-blue" />
               종목 선택
             </h3>
-            <StockInput stocks={selectedStocks} onChange={setSelectedStocks} />
+            <StockInput stocks={selectedStocks} onChange={setSelectedStocks} onNamesChange={setStockNames} />
           </div>
 
           {/* 기간 설정 */}
@@ -768,47 +769,92 @@ export default function BacktestPage() {
               </div>
 
               {/* 거래 내역 */}
-              {result.trades && result.trades.length > 0 && (
-                <div className="card">
-                  <button
-                    onClick={() => setTradesOpen((o) => !o)}
-                    className="w-full flex items-center justify-between text-sm font-medium text-slate-700 dark:text-slate-300"
-                  >
-                    <span>거래 내역 ({result.trades.length}건)</span>
-                    <ChevronDown className={cn("w-4 h-4 transition-transform", tradesOpen && "rotate-180")} />
-                  </button>
-                  {tradesOpen && (
-                    <div className="mt-3 overflow-x-auto">
-                      <table className="w-full text-sm">
-                        <thead>
-                          <tr className="text-left text-slate-500 dark:text-slate-400 border-b border-slate-200 dark:border-slate-700">
-                            <th className="pb-2 pr-4 font-medium">시간</th>
-                            <th className="pb-2 pr-4 font-medium">종목</th>
-                            <th className="pb-2 pr-4 font-medium">방향</th>
-                            <th className="pb-2 pr-4 text-right font-medium">수량</th>
-                            <th className="pb-2 text-right font-medium">체결가</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {result.trades.map((trade, i) => (
-                            <tr key={i} className="border-b border-slate-100 dark:border-slate-800 last:border-0">
-                              <td className="py-1.5 pr-4 text-slate-500 dark:text-slate-400 text-xs">
-                                {trade.time ? new Date(trade.time).toLocaleDateString("ko-KR") : "-"}
-                              </td>
-                              <td className="py-1.5 pr-4 font-mono">{trade.symbol}</td>
-                              <td className={cn("py-1.5 pr-4 font-medium", trade.direction === "Buy" ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400")}>
-                                {trade.direction === "Buy" ? "매수" : "매도"}
-                              </td>
-                              <td className="py-1.5 pr-4 text-right">{trade.quantity.toLocaleString()}주</td>
-                              <td className="py-1.5 text-right font-mono">{Math.round(trade.price).toLocaleString()}원</td>
+              {result.trades && result.trades.length > 0 && (() => {
+                // 매수→매도 페어링
+                const buyQueues: Record<string, typeof result.trades> = {};
+                const paired: {
+                  symbol: string;
+                  buyDate: string; buyPrice: number;
+                  sellDate: string | null; sellPrice: number | null;
+                  returnPct: number | null;
+                }[] = [];
+                for (const t of result.trades) {
+                  if (t.direction === "Buy") {
+                    if (!buyQueues[t.symbol]) buyQueues[t.symbol] = [];
+                    buyQueues[t.symbol].push(t);
+                  } else {
+                    const buyTrade = buyQueues[t.symbol]?.shift();
+                    if (buyTrade) {
+                      const ret = ((t.price - buyTrade.price) / buyTrade.price) * 100;
+                      paired.push({ symbol: t.symbol, buyDate: buyTrade.time, buyPrice: buyTrade.price, sellDate: t.time, sellPrice: t.price, returnPct: ret });
+                    } else {
+                      paired.push({ symbol: t.symbol, buyDate: "", buyPrice: 0, sellDate: t.time, sellPrice: t.price, returnPct: null });
+                    }
+                  }
+                }
+                // 미체결 매수 추가
+                for (const [sym, queue] of Object.entries(buyQueues)) {
+                  for (const b of queue) {
+                    paired.push({ symbol: sym, buyDate: b.time, buyPrice: b.price, sellDate: null, sellPrice: null, returnPct: null });
+                  }
+                }
+                return (
+                  <div className="card">
+                    <button
+                      onClick={() => setTradesOpen((o) => !o)}
+                      className="w-full flex items-center justify-between text-sm font-medium text-slate-700 dark:text-slate-300"
+                    >
+                      <span>거래 내역 ({paired.length}건)</span>
+                      <ChevronDown className={cn("w-4 h-4 transition-transform", tradesOpen && "rotate-180")} />
+                    </button>
+                    {tradesOpen && (
+                      <div className="mt-3 overflow-x-auto">
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="text-left text-slate-500 dark:text-slate-400 border-b border-slate-200 dark:border-slate-700">
+                              <th className="pb-2 pr-4 font-medium">종목</th>
+                              <th className="pb-2 pr-4 font-medium">매수 날짜</th>
+                              <th className="pb-2 pr-4 text-right font-medium">매수가</th>
+                              <th className="pb-2 pr-4 font-medium">매도 날짜</th>
+                              <th className="pb-2 pr-4 text-right font-medium">매도가</th>
+                              <th className="pb-2 text-right font-medium">수익률</th>
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </div>
-              )}
+                          </thead>
+                          <tbody>
+                            {paired.map((row, i) => (
+                              <tr key={i} className="border-b border-slate-100 dark:border-slate-800 last:border-0">
+                                <td className="py-1.5 pr-4 whitespace-nowrap">
+                                  {stockNames[row.symbol]
+                                    ? <><span className="font-medium">{stockNames[row.symbol]}</span><span className="ml-1 text-xs text-slate-400 font-mono">({row.symbol})</span></>
+                                    : <span className="font-mono">{row.symbol}</span>}
+                                </td>
+                                <td className="py-1.5 pr-4 text-slate-500 dark:text-slate-400 text-xs whitespace-nowrap">
+                                  {row.buyDate ? new Date(row.buyDate).toLocaleDateString("ko-KR") : "-"}
+                                </td>
+                                <td className="py-1.5 pr-4 text-right font-mono text-xs whitespace-nowrap">
+                                  {row.buyPrice ? Math.round(row.buyPrice).toLocaleString() + "원" : "-"}
+                                </td>
+                                <td className="py-1.5 pr-4 text-slate-500 dark:text-slate-400 text-xs whitespace-nowrap">
+                                  {row.sellDate ? new Date(row.sellDate).toLocaleDateString("ko-KR") : <span className="text-amber-500">보유중</span>}
+                                </td>
+                                <td className="py-1.5 pr-4 text-right font-mono text-xs whitespace-nowrap">
+                                  {row.sellPrice ? Math.round(row.sellPrice).toLocaleString() + "원" : "-"}
+                                </td>
+                                <td className={cn("py-1.5 text-right font-medium text-xs whitespace-nowrap",
+                                  row.returnPct === null ? "text-slate-400" :
+                                  row.returnPct >= 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"
+                                )}>
+                                  {row.returnPct === null ? "-" : `${row.returnPct >= 0 ? "+" : ""}${row.returnPct.toFixed(2)}%`}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </>
           ) : (
             <div className="card flex flex-col items-center justify-center py-16 text-slate-400">

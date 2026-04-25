@@ -1,19 +1,44 @@
 /**
- * 백테스트 API
+ * 백테스트 API — 비동기 잡 패턴
+ *
+ * POST /run  → job_id 즉시 반환 (202)
+ * GET  /jobs/{job_id} → 상태 폴링 (pending / running / completed / failed)
  */
 
-import { apiPost } from "./client";
+import { apiGet, apiPost } from "./client";
 import type {
   BacktestRequest,
-  CustomBacktestRequest,
+  BacktestJobResponse,
   BacktestResponse,
+  CustomBacktestRequest,
+  JobSubmitResponse,
 } from "@/types";
+
+const POLL_INTERVAL_MS = 2000;
+const POLL_TIMEOUT_MS = 15 * 60 * 1000; // 15분
+
+async function pollJob(jobId: string): Promise<BacktestResponse> {
+  const deadline = Date.now() + POLL_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const job = await apiGet<BacktestJobResponse>(`/api/backtest/jobs/${jobId}`);
+    if (job.status === "completed") {
+      return { success: true, data: job.result!, message: "백테스트 완료" };
+    }
+    if (job.status === "failed") {
+      throw new Error(job.error || "백테스트 실패");
+    }
+    // pending / running → 대기 후 재시도
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+  }
+  throw new Error("백테스트 폴링 시간 초과 (15분)");
+}
 
 /**
  * 백테스트 실행 (Preset 전략)
  */
 export async function runBacktest(request: BacktestRequest): Promise<BacktestResponse> {
-  return apiPost("/api/backtest/run", request);
+  const { job_id } = await apiPost<JobSubmitResponse>("/api/backtest/run", request);
+  return pollJob(job_id);
 }
 
 /**
@@ -39,5 +64,6 @@ export async function runCustomBacktest(
     tax_rate: taxRate,
     slippage,
   };
-  return apiPost("/api/backtest/run-custom", request);
+  const { job_id } = await apiPost<JobSubmitResponse>("/api/backtest/run-custom", request);
+  return pollJob(job_id);
 }

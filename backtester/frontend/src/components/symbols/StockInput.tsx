@@ -18,12 +18,13 @@ interface StockWithName {
 interface StockInputProps {
   stocks: string[];
   onChange: (stocks: string[]) => void;
+  onNamesChange?: (names: Record<string, string>) => void;
 }
 
 // 빠른 선택용 코드 목록 (이름은 마스터파일에서 조회)
 const POPULAR_CODES = ["005930", "000660", "035720", "005380", "051910", "035420"];
 
-export function StockInput({ stocks, onChange }: StockInputProps) {
+export function StockInput({ stocks, onChange, onNamesChange }: StockInputProps) {
   const [inputMode, setInputMode] = useState<InputMode>("search");
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Symbol[]>([]);
@@ -31,6 +32,11 @@ export function StockInput({ stocks, onChange }: StockInputProps) {
   const [isLoading, setIsLoading] = useState(false);
   const [highlightIndex, setHighlightIndex] = useState(-1);
   const [stockNames, setStockNames] = useState<Record<string, string>>({});
+
+  // 종목명 맵 변경 시 외부로 전파
+  useEffect(() => {
+    onNamesChange?.(stockNames);
+  }, [stockNames, onNamesChange]);
   const [popularStocks, setPopularStocks] = useState<StockWithName[]>([]);
   const [needsCollection, setNeedsCollection] = useState(false);
 
@@ -322,6 +328,14 @@ export function StockInput({ stocks, onChange }: StockInputProps) {
     [stocks, onChange]
   );
 
+  // 시장 선도주 패널에서 종목 일괄 삭제
+  const handleRemoveMarketLeaders = useCallback(
+    (codes: string[]) => {
+      onChange(stocks.filter((c) => !codes.includes(c)));
+    },
+    [stocks, onChange]
+  );
+
   return (
     <div className="space-y-3">
       {/* 탭: 종목 검색 / 시장 선도주 */}
@@ -353,6 +367,7 @@ export function StockInput({ stocks, onChange }: StockInputProps) {
         <MarketLeadersPanel
           selectedStocks={stocks}
           onAddStocks={handleAddMarketLeaders}
+          onRemoveStocks={handleRemoveMarketLeaders}
         />
       )}
 

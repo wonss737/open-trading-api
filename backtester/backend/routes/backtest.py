@@ -3,12 +3,15 @@
 Lean Docker 기반 백테스트 실행.
 """
 
+import asyncio
 import logging
+import uuid
+from enum import Enum
 from typing import Any, Dict, List, Optional
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 
 from backend.schemas.backtest import (
@@ -22,6 +25,39 @@ from kis_backtest.lean.project_manager import LeanProjectManager
 from kis_backtest.lean.data_converter import DataConverter
 from kis_backtest.lean.result_formatter import parse_lean_value
 import kis_backtest.strategies.preset  # 전략 자동 등록
+
+
+# ============================================================
+# 비동기 잡 스토어
+# ============================================================
+
+class JobStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class BacktestJobState:
+    """메모리 내 잡 상태"""
+    def __init__(self, job_id: str):
+        self.job_id = job_id
+        self.status: JobStatus = JobStatus.PENDING
+        self.result: Optional[Dict] = None   # BacktestResult dict (completed)
+        self.error: Optional[str] = None     # error message (failed)
+        self.created_at: datetime = datetime.now()
+        self.finished_at: Optional[datetime] = None
+
+
+# job_id → BacktestJobState (서버 메모리에만 유지)
+_jobs: Dict[str, BacktestJobState] = {}
+
+
+def _new_job() -> BacktestJobState:
+    job_id = uuid.uuid4().hex
+    job = BacktestJobState(job_id)
+    _jobs[job_id] = job
+    return job
 
 
 def _load_benchmark_curve(
@@ -206,6 +242,38 @@ def _lean_run_to_api_response(
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+class JobSubmitResponse(BaseModel):
+    """잡 제출 응답 — job_id만 즉시 반환"""
+    job_id: str
+    status: str = "pending"
+
+
+class BacktestJobResponse(BaseModel):
+    """잡 상태 조회 응답"""
+    job_id: str
+    status: str
+    result: Optional[Dict] = None
+    error: Optional[str] = None
+    created_at: str
+    finished_at: Optional[str] = None
+
+
+@router.get("/jobs/{job_id}", summary="잡 상태 조회")
+async def get_job_status(job_id: str) -> BacktestJobResponse:
+    """백테스트 잡 상태 및 결과 조회"""
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+    return BacktestJobResponse(
+        job_id=job.job_id,
+        status=job.status.value,
+        result=job.result,
+        error=job.error,
+        created_at=job.created_at.isoformat(),
+        finished_at=job.finished_at.isoformat() if job.finished_at else None,
+    )
 
 
 def _classify_lean_error(error: str, output: str) -> str:
@@ -478,145 +546,132 @@ async def prepare_benchmark_data(
         return False
 
 
-@router.post(
-    "/run",
-    response_model=BacktestResponse,
-    summary="백테스트 실행",
-    description="전략을 백테스트합니다 (Lean Docker). param_overrides로 파라미터 변경 가능.",
-)
-async def run_backtest(request: BacktestRequest) -> BacktestResponse:
-    """백테스트 실행
-
-    param_overrides 예시:
-        {"period": 21, "oversold": 25}
-    """
-
-    # 전략 빌드 (param_overrides 적용)
+async def _run_backtest_job(job: BacktestJobState, request: BacktestRequest) -> None:
+    """프리셋 전략 백테스트 백그라운드 잡"""
+    job.status = JobStatus.RUNNING
+    strategy_id = request.strategy_id
     try:
-        if request.param_overrides:
-            definition = StrategyRegistry.build_with_params(
-                request.strategy_id,
-                **request.param_overrides,
-            )
-        else:
-            definition = StrategyRegistry.build(request.strategy_id)
-    except KeyError:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Strategy not found: {request.strategy_id}"
+        # 전략 빌드
+        try:
+            if request.param_overrides:
+                definition = StrategyRegistry.build_with_params(strategy_id, **request.param_overrides)
+            else:
+                definition = StrategyRegistry.build(strategy_id)
+        except KeyError:
+            raise RuntimeError(f"Strategy not found: {strategy_id}")
+
+        start_date = request.start_date
+        end_date = request.end_date
+        if isinstance(start_date, date):
+            start_date = start_date.isoformat()
+        if isinstance(end_date, date):
+            end_date = end_date.isoformat()
+
+        manager = LeanProjectManager()
+        workspace = manager.workspace
+
+        logger.info(
+            f"[Job {job.job_id}] 시작 | strategy={strategy_id} | symbols={request.symbols} "
+            f"| {start_date} ~ {end_date}"
         )
-    
-    # 날짜 검증
-    start_date = request.start_date
-    end_date = request.end_date
-    
-    if isinstance(start_date, date):
-        start_date = start_date.isoformat()
-    if isinstance(end_date, date):
-        end_date = end_date.isoformat()
-    
-    # 워크스페이스 경로
-    manager = LeanProjectManager()
-    workspace = manager.workspace
-    
-    # 시장 데이터 준비 (KIS API → Lean CSV)
-    try:
+
+        # 시장 데이터
         data_result = await prepare_market_data(
-            symbols=request.symbols,
-            start_date=start_date,
-            end_date=end_date,
-            workspace=workspace,
+            symbols=request.symbols, start_date=start_date,
+            end_date=end_date, workspace=workspace,
         )
-        logger.info(f"[Data] 결과: {data_result}")
-        
-        # 데이터 없으면 에러
+        logger.info(f"[Job {job.job_id}] 데이터: {data_result}")
         if data_result["errors"] and not data_result["downloaded"] and not data_result["skipped"]:
             error_msg = data_result["errors"][0]["error"] if data_result["errors"] else "데이터 다운로드 실패"
-            raise HTTPException(status_code=400, detail=f"데이터 준비 실패: {error_msg}")
-            
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"데이터 준비 실패: {e}")
+            raise RuntimeError(f"데이터 준비 실패: {error_msg}")
 
-    # 벤치마크 데이터 준비 (KOSPI)
-    try:
-        await prepare_benchmark_data(
-            start_date=start_date,
-            end_date=end_date,
-            workspace=workspace,
-        )
-    except Exception as e:
-        logger.warning(f"[Benchmark] 준비 실패 (무시): {e}")
+        # 벤치마크
+        try:
+            await prepare_benchmark_data(start_date=start_date, end_date=end_date, workspace=workspace)
+        except Exception as e:
+            logger.warning(f"[Job {job.job_id}] 벤치마크 준비 실패 (무시): {e}")
 
-    # Lean 코드 생성
-    try:
-        # 거래 비용 설정
+        # 코드 생성
         config = CodeGenConfig(
             commission_rate=request.commission_rate or 0.00015,
             tax_rate=request.tax_rate or 0.002,
             slippage=request.slippage or 0.0,
             initial_capital=request.initial_capital,
         )
-        generator = LeanCodeGenerator(definition, config=config)
-        code = generator.generate(
-            symbols=request.symbols,
-            start_date=start_date,
-            end_date=end_date,
+        code = LeanCodeGenerator(definition, config=config).generate(
+            symbols=request.symbols, start_date=start_date,
+            end_date=end_date, initial_capital=request.initial_capital,
+        )
+
+        # 프로젝트 생성 및 Docker 실행
+        project = LeanProjectManager.create_project(
+            run_id=f"bt_{definition.id}",
+            symbols=request.symbols, start_date=start_date, end_date=end_date,
             initial_capital=request.initial_capital,
+            strategy_id=definition.id, strategy_name=definition.name,
         )
+        project.main_py.write_text(code)
+
+        lean_run = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: LeanExecutor.run(project)
+        )
+
+        if lean_run.success:
+            try:
+                result_data = _lean_run_to_api_response(
+                    lean_run, definition.name, request.symbols,
+                    start_date, end_date, request.initial_capital, workspace=workspace,
+                )
+            except Exception as parse_err:
+                lean_log_tail = (lean_run.output or "")[-2000:]
+                logger.error(
+                    f"[Job {job.job_id}] 결과 파싱 실패\n오류: {parse_err}\n"
+                    f"--- Lean Output (tail) ---\n{lean_log_tail}\n--- End ---"
+                )
+                raise RuntimeError(f"백테스트 결과 파싱 오류: {parse_err}")
+            job.result = result_data
+            job.status = JobStatus.COMPLETED
+            logger.info(f"[Job {job.job_id}] 완료")
+        else:
+            error = lean_run.error or "Unknown error"
+            lean_log_tail = (lean_run.output or "")[-2000:]
+            logger.error(
+                f"[Job {job.job_id}] Lean 실패\n오류: {error}\n"
+                f"--- Lean Output (tail) ---\n{lean_log_tail}\n--- End ---"
+            )
+            job.error = _classify_lean_error(error, lean_run.output or "")
+            job.status = JobStatus.FAILED
+
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Code generation failed: {e}")
+        logger.error(f"[Job {job.job_id}] 예외: {e}", exc_info=True)
+        job.error = str(e)
+        job.status = JobStatus.FAILED
+    finally:
+        job.finished_at = datetime.now()
 
-    # Docker 환경 확인
+
+@router.post(
+    "/run",
+    response_model=JobSubmitResponse,
+    status_code=202,
+    summary="백테스트 잡 제출",
+    description="백테스트 잡을 제출합니다. job_id를 즉시 반환하며, GET /jobs/{job_id}로 상태를 폴링하세요.",
+)
+async def run_backtest(
+    request: BacktestRequest, background_tasks: BackgroundTasks
+) -> JobSubmitResponse:
+    """백테스트 잡 제출 (비동기) — ECONNRESET 방지"""
     if not LeanExecutor.check_docker():
-        raise HTTPException(
-            status_code=503,
-            detail="Docker가 실행되지 않습니다. Docker Desktop을 시작해주세요."
-        )
-
+        raise HTTPException(status_code=503, detail="Docker가 실행되지 않습니다. Docker Desktop을 시작해주세요.")
     if not LeanExecutor.check_image():
         raise HTTPException(
             status_code=503,
-            detail="Lean 이미지가 없습니다. 'docker pull quantconnect/lean:latest' 실행 후 재시도해주세요."
+            detail="Lean 이미지가 없습니다. 'docker pull quantconnect/lean:latest' 실행 후 재시도해주세요.",
         )
-
-    # 프로젝트 생성 및 백테스트 실행
-    try:
-        project = LeanProjectManager.create_project(
-            run_id=f"bt_{definition.id}",
-            symbols=request.symbols,
-            start_date=start_date,
-            end_date=end_date,
-            initial_capital=request.initial_capital,
-            strategy_id=definition.id,
-            strategy_name=definition.name,
-        )
-        # 코드 저장
-        project.main_py.write_text(code)
-
-        lean_run = LeanExecutor.run(project)
-
-        if lean_run.success:
-            result_data = _lean_run_to_api_response(
-                lean_run, definition.name, request.symbols,
-                start_date, end_date, request.initial_capital,
-                workspace=workspace,
-            )
-            return BacktestResponse(
-                success=True,
-                data=result_data,
-                message="백테스트 완료",
-            )
-        else:
-            # 에러 메시지 분류
-            error = lean_run.error or "Unknown error"
-            error_detail = _classify_lean_error(error, lean_run.output)
-            raise HTTPException(status_code=500, detail=error_detail)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"백테스트 실행 오류: {e}")
+    job = _new_job()
+    background_tasks.add_task(_run_backtest_job, job, request)
+    logger.info(f"[Backtest] 잡 제출 | job_id={job.job_id} | strategy={request.strategy_id} | symbols={request.symbols}")
+    return JobSubmitResponse(job_id=job.job_id)
 
 
 
@@ -633,131 +688,124 @@ class CustomBacktestRequest(BaseModel):
     slippage: Optional[float] = 0.0  # 슬리피지 (기본 0%)
 
 
-@router.post(
-    "/run-custom",
-    response_model=BacktestResponse,
-    summary="커스텀 전략 백테스트",
-    description="YAML 정의로 커스텀 전략을 백테스트합니다. param_overrides로 $param_name 값 변경 가능.",
-)
-async def run_custom_backtest(request: CustomBacktestRequest) -> BacktestResponse:
-    """커스텀 전략 백테스트 - 스키마 기반
-
-    param_overrides로 YAML의 $param_name 값을 오버라이드할 수 있습니다.
-    예: {"period": 21, "oversold": 25}
-    """
+async def _run_custom_backtest_job(job: BacktestJobState, request: CustomBacktestRequest) -> None:
+    """커스텀 전략 백테스트 백그라운드 잡"""
     from kis_backtest.file.loader import StrategyFileLoader
 
-    # YAML 파싱 → StrategySchema (타입 안전, param_overrides 적용)
+    job.status = JobStatus.RUNNING
     try:
-        schema = StrategyFileLoader.load_schema_with_params(
-            request.yaml_content,
-            param_overrides=request.param_overrides,
+        # YAML 파싱
+        try:
+            schema = StrategyFileLoader.load_schema_with_params(
+                request.yaml_content, param_overrides=request.param_overrides,
+            )
+        except Exception as e:
+            raise RuntimeError(f"Invalid YAML: {e}")
+
+        manager = LeanProjectManager()
+        workspace = manager.workspace
+
+        logger.info(
+            f"[Job {job.job_id}] 시작 (custom) | strategy={schema.id} | symbols={request.symbols} "
+            f"| {request.start_date} ~ {request.end_date}"
         )
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid YAML: {e}")
-    
-    # 워크스페이스 경로
-    manager = LeanProjectManager()
-    workspace = manager.workspace
-    
-    # 시장 데이터 준비 (KIS API → Lean CSV)
-    try:
+
+        # 시장 데이터
         data_result = await prepare_market_data(
-            symbols=request.symbols,
-            start_date=request.start_date,
-            end_date=request.end_date,
-            workspace=workspace,
+            symbols=request.symbols, start_date=request.start_date,
+            end_date=request.end_date, workspace=workspace,
         )
-        logger.info(f"[Data] 결과: {data_result}")
-        
-        # 데이터 없으면 에러
+        logger.info(f"[Job {job.job_id}] 데이터: {data_result}")
         if data_result["errors"] and not data_result["downloaded"] and not data_result["skipped"]:
             error_msg = data_result["errors"][0]["error"] if data_result["errors"] else "데이터 다운로드 실패"
-            raise HTTPException(status_code=400, detail=f"데이터 준비 실패: {error_msg}")
-            
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"데이터 준비 실패: {e}")
+            raise RuntimeError(f"데이터 준비 실패: {error_msg}")
 
-    # 벤치마크 데이터 준비 (KOSPI)
-    try:
-        await prepare_benchmark_data(
-            start_date=request.start_date,
-            end_date=request.end_date,
-            workspace=workspace,
-        )
-    except Exception as e:
-        logger.warning(f"[Benchmark] 준비 실패 (무시): {e}")
+        # 벤치마크
+        try:
+            await prepare_benchmark_data(
+                start_date=request.start_date, end_date=request.end_date, workspace=workspace
+            )
+        except Exception as e:
+            logger.warning(f"[Job {job.job_id}] 벤치마크 준비 실패 (무시): {e}")
 
-    # Lean 코드 생성 (스키마 기반)
-    try:
-        if schema is None:
-            raise HTTPException(status_code=400, detail="전략 스키마 생성 실패")
-        
-        # 거래 비용 설정
+        # 코드 생성
         config = CodeGenConfig(
             commission_rate=request.commission_rate or 0.00015,
             tax_rate=request.tax_rate or 0.002,
             slippage=request.slippage or 0.0,
             initial_capital=request.initial_capital,
         )
-        generator = LeanCodeGenerator(schema, config=config)
-        code = generator.generate(
-            symbols=request.symbols,
-            start_date=request.start_date,
-            end_date=request.end_date,
-            initial_capital=request.initial_capital,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Code generation failed: {e}")
-    
-    # Docker 환경 확인
-    if not LeanExecutor.check_docker():
-        raise HTTPException(
-            status_code=503,
-            detail="Docker가 실행되지 않습니다. Docker Desktop을 시작해주세요."
+        code = LeanCodeGenerator(schema, config=config).generate(
+            symbols=request.symbols, start_date=request.start_date,
+            end_date=request.end_date, initial_capital=request.initial_capital,
         )
 
+        # 프로젝트 생성 및 Docker 실행
+        project = LeanProjectManager.create_project(
+            run_id=f"bt_custom_{schema.id}",
+            symbols=request.symbols, start_date=request.start_date, end_date=request.end_date,
+            initial_capital=request.initial_capital,
+            strategy_id=schema.id, strategy_name=schema.name,
+        )
+        project.main_py.write_text(code)
+
+        lean_run = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: LeanExecutor.run(project)
+        )
+
+        if lean_run.success:
+            try:
+                result_data = _lean_run_to_api_response(
+                    lean_run, schema.name, request.symbols,
+                    request.start_date, request.end_date, request.initial_capital, workspace=workspace,
+                )
+            except Exception as parse_err:
+                lean_log_tail = (lean_run.output or "")[-2000:]
+                logger.error(
+                    f"[Job {job.job_id}] 결과 파싱 실패\n오류: {parse_err}\n"
+                    f"--- Lean Output (tail) ---\n{lean_log_tail}\n--- End ---"
+                )
+                raise RuntimeError(f"백테스트 결과 파싱 오류: {parse_err}")
+            job.result = result_data
+            job.status = JobStatus.COMPLETED
+            logger.info(f"[Job {job.job_id}] 완료 (custom)")
+        else:
+            error = lean_run.error or "Unknown error"
+            lean_log_tail = (lean_run.output or "")[-2000:]
+            logger.error(
+                f"[Job {job.job_id}] Lean 실패 (custom)\n오류: {error}\n"
+                f"--- Lean Output (tail) ---\n{lean_log_tail}\n--- End ---"
+            )
+            job.error = _classify_lean_error(error, lean_run.output or "")
+            job.status = JobStatus.FAILED
+
+    except Exception as e:
+        logger.error(f"[Job {job.job_id}] 예외 (custom): {e}", exc_info=True)
+        job.error = str(e)
+        job.status = JobStatus.FAILED
+    finally:
+        job.finished_at = datetime.now()
+
+
+@router.post(
+    "/run-custom",
+    response_model=JobSubmitResponse,
+    status_code=202,
+    summary="커스텀 전략 백테스트 잡 제출",
+    description="YAML 정의로 커스텀 전략 잡을 제출합니다. job_id를 즉시 반환하며, GET /jobs/{job_id}로 상태를 폴링하세요.",
+)
+async def run_custom_backtest(
+    request: CustomBacktestRequest, background_tasks: BackgroundTasks
+) -> JobSubmitResponse:
+    """커스텀 백테스트 잡 제출 (비동기) — ECONNRESET 방지"""
+    if not LeanExecutor.check_docker():
+        raise HTTPException(status_code=503, detail="Docker가 실행되지 않습니다. Docker Desktop을 시작해주세요.")
     if not LeanExecutor.check_image():
         raise HTTPException(
             status_code=503,
-            detail="Lean 이미지가 없습니다. 'docker pull quantconnect/lean:latest' 실행 후 재시도해주세요."
+            detail="Lean 이미지가 없습니다. 'docker pull quantconnect/lean:latest' 실행 후 재시도해주세요.",
         )
-
-    # 프로젝트 생성 및 백테스트 실행
-    try:
-        project = LeanProjectManager.create_project(
-            run_id=f"bt_custom_{schema.id}",
-            symbols=request.symbols,
-            start_date=request.start_date,
-            end_date=request.end_date,
-            initial_capital=request.initial_capital,
-            strategy_id=schema.id,
-            strategy_name=schema.name,
-        )
-        # 코드 저장
-        project.main_py.write_text(code)
-
-        lean_run = LeanExecutor.run(project)
-
-        if lean_run.success:
-            result_data = _lean_run_to_api_response(
-                lean_run, schema.name, request.symbols,
-                request.start_date, request.end_date, request.initial_capital,
-                workspace=workspace,
-            )
-            return BacktestResponse(
-                success=True,
-                data=result_data,
-                message="백테스트 완료",
-            )
-        else:
-            # 에러 메시지 분류
-            error = lean_run.error or "Unknown error"
-            error_detail = _classify_lean_error(error, lean_run.output)
-            raise HTTPException(status_code=500, detail=error_detail)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"백테스트 실행 오류: {e}")
+    job = _new_job()
+    background_tasks.add_task(_run_custom_backtest_job, job, request)
+    logger.info(f"[Backtest] 잡 제출 (custom) | job_id={job.job_id} | symbols={request.symbols}")
+    return JobSubmitResponse(job_id=job.job_id)
