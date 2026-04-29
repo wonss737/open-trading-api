@@ -74,9 +74,9 @@ function BandRow({
   return (
     <div className="flex items-center justify-between text-xs">
       <span className="text-slate-500 w-12 shrink-0">{label}</span>
-      <span className={cn("font-mono tabular-nums", color)}>
+      <span className={cn("font-mono tabular-nums", color, Math.abs(gap_pct) <= 5 && "font-bold")}>
         {pctStr}
-        <span className="ml-1.5 text-slate-500 dark:text-slate-400">{priceStr}</span>
+        <span className="ml-1.5 text-slate-500 dark:text-slate-400 font-normal">{priceStr}</span>
       </span>
     </div>
   );
@@ -148,9 +148,7 @@ function MultiSignalCard({
               {item.name !== item.symbol ? item.name : item.symbol}
             </p>
           </div>
-          {item.name !== item.symbol && (
-            <p className="text-xs text-slate-400 font-mono mt-0.5">{item.symbol}</p>
-          )}
+          <p className="text-xs text-slate-400 font-mono mt-0.5">{item.symbol}</p>
         </div>
         {multi?.current_price != null && (
           <p className="text-sm font-mono font-bold text-slate-700 dark:text-slate-300 ml-2 shrink-0">
