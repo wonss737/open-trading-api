@@ -1,5 +1,5 @@
 import { apiGet } from "./client";
-import type { SignalsResponse } from "@/types/signals";
+import type { SignalsResponse, MultiSignalsResponse } from "@/types/signals";
 
 export interface GetSignalsParams {
   symbols: string[];
@@ -16,4 +16,10 @@ export async function getSignals(params: GetSignalsParams): Promise<SignalsRespo
   if (slow_period != null) qs.set("slow_period", String(slow_period));
   if (signal_period != null) qs.set("signal_period", String(signal_period));
   return apiGet<SignalsResponse>(`/api/signals?${qs}`);
+}
+
+export async function getMultiSignals(symbols: string[], forceRefresh = false): Promise<MultiSignalsResponse> {
+  const qs = new URLSearchParams({ symbols: symbols.join(",") });
+  if (forceRefresh) qs.set("force_refresh", "true");
+  return apiGet<MultiSignalsResponse>(`/api/signals/multi?${qs}`);
 }

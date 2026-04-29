@@ -1,27 +1,23 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, type ReactNode } from "react";
 import {
   Bell,
   RefreshCw,
   Plus,
   X,
-  TrendingUp,
-  TrendingDown,
   AlertCircle,
   Loader2,
-  ChevronDown,
-  ChevronUp,
   Globe,
+  Download,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { getSignals, getMarketLeaders } from "@/lib/api";
-import type { SignalItem, SignalStatus, SignalStrategyOption } from "@/types/signals";
-import { SIGNAL_STRATEGIES } from "@/types/signals";
+import { getMultiSignals, getMarketLeaders } from "@/lib/api";
+import type { MultiSignalItem } from "@/types/signals";
 import type { MarketLeaderItem } from "@/types/market_leaders";
 
 const LOCALSTORAGE_KEY = "signal_watchlist_v2";
-const MAX_LEADERS = 15;
+const BATCH_SIZE = 10;
 
 function loadWatchlist(): string[] {
   if (typeof window === "undefined") return [];
@@ -37,93 +33,75 @@ function saveWatchlist(list: string[]) {
   localStorage.setItem(LOCALSTORAGE_KEY, JSON.stringify(list));
 }
 
-function formatPrice(price: number | null, symbol: string): string {
+function formatPrice(price: number | null, symbol: string): ReactNode {
   if (price == null) return "-";
   const isUs = /^[A-Za-z]/.test(symbol);
   if (isUs) return `$${price.toFixed(2)}`;
-  return `₩${Math.round(price).toLocaleString()}`;
+  return <><span style={{ fontSize: "0.8em" }}>₩</span>{Math.round(price).toLocaleString()}</>;
 }
 
-// ── Signal Badge ──────────────────────────────────────────
-function SignalBadge({
-  signal,
+function formatGapPrice(gap_price: number, symbol: string): ReactNode {
+  const isUs = /^[A-Za-z]/.test(symbol);
+  const abs = Math.abs(gap_price);
+  if (isUs) return `$${abs.toFixed(2)}`;
+  return <><span style={{ fontSize: "0.8em" }}>₩</span>{Math.round(abs).toLocaleString()}</>;
+}
+
+// ── Band Row ──────────────────────────────────────────────────
+function BandRow({
   label,
+  gap_pct,
+  gap_price,
+  symbol,
 }: {
-  signal?: SignalStatus;
-  label: "매수" | "매도";
+  label: string;
+  gap_pct: number;
+  gap_price: number;
+  symbol: string;
 }) {
-  if (!signal) {
-    return (
-      <div className="flex items-center justify-between">
-        <span className="text-xs text-slate-500">{label}</span>
-        <span className="text-xs text-slate-400">-</span>
-      </div>
-    );
-  }
-
-  const pct = signal.proximity_pct;
-
-  if (signal.active) {
-    const isBuy = label === "매수";
-    return (
-      <div className="flex items-center justify-between">
-        <span className="text-xs text-slate-500">{label}</span>
-        <span
-          className={cn(
-            "inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold",
-            isBuy
-              ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
-              : "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
-          )}
-        >
-          {isBuy ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
-          ON
-        </span>
-      </div>
-    );
-  }
-
-  const abs = Math.abs(pct);
-  const color =
-    abs < 1.5
-      ? "text-amber-500 dark:text-amber-400"
-      : abs < 5
-      ? "text-yellow-500 dark:text-yellow-400"
-      : "text-slate-400";
-  const sign = pct >= 0 ? "+" : "";
+  const isAbove = gap_pct > 0;
+  const isClose = !isAbove && gap_pct > -2;
+  const color = isAbove
+    ? "text-emerald-500 dark:text-emerald-400"
+    : isClose
+    ? "text-amber-500 dark:text-amber-400"
+    : "text-slate-400";
+  const pctStr = `${gap_pct >= 0 ? "+" : ""}${gap_pct.toFixed(2)}%`;
+  const priceStr = formatGapPrice(gap_price, symbol);
 
   return (
-    <div className="flex items-center justify-between">
-      <span className="text-xs text-slate-500">{label}</span>
-      <span className={cn("text-xs font-mono tabular-nums", color)}>
-        {sign}
-        {pct.toFixed(2)}%
+    <div className="flex items-center justify-between text-xs">
+      <span className="text-slate-500 w-12 shrink-0">{label}</span>
+      <span className={cn("font-mono tabular-nums", color)}>
+        {pctStr}
+        <span className="ml-1.5 text-slate-500 dark:text-slate-400">{priceStr}</span>
       </span>
     </div>
   );
 }
 
-// ── Signal Card ───────────────────────────────────────────
-function SignalCard({
+// ── Multi Signal Card ─────────────────────────────────────────
+function MultiSignalCard({
   item,
   loading,
 }: {
-  item: SignalItem | { symbol: string; name: string };
+  item: MultiSignalItem | { symbol: string; name: string };
   loading?: boolean;
 }) {
-  const signalItem = "buy_signal" in item || "error" in item ? (item as SignalItem) : null;
-  const hasBuyOn = signalItem?.buy_signal?.active;
-  const hasSellOn = signalItem?.sell_signal?.active;
+  const multi =
+    "signals" in item || "error" in item ? (item as MultiSignalItem) : null;
+  const signals = multi?.signals;
+  const isGolden = signals?.macd.is_golden;
 
   return (
     <div
       className={cn(
         "card transition-all",
-        hasBuyOn && "border-emerald-300 dark:border-emerald-700",
-        hasSellOn && !hasBuyOn && "border-amber-300 dark:border-amber-700",
+        isGolden && "border-emerald-300 dark:border-emerald-700",
       )}
     >
-      <div className="flex items-start justify-between mb-3">
+      {/* Header */}
+      <div className="flex items-start justify-between mb-2">
         <div className="min-w-0 flex-1">
           <p className="font-semibold text-slate-900 dark:text-white text-sm leading-tight truncate">
             {item.name !== item.symbol ? item.name : item.symbol}
@@ -132,9 +110,9 @@ function SignalCard({
             <p className="text-xs text-slate-400 font-mono mt-0.5">{item.symbol}</p>
           )}
         </div>
-        {signalItem?.current_price != null && (
+        {multi?.current_price != null && (
           <p className="text-sm font-mono font-bold text-slate-700 dark:text-slate-300 ml-2 shrink-0">
-            {formatPrice(signalItem.current_price, item.symbol)}
+            {formatPrice(multi.current_price, item.symbol)}
           </p>
         )}
       </div>
@@ -144,18 +122,90 @@ function SignalCard({
           <Loader2 className="w-3.5 h-3.5 animate-spin" />
           계산 중...
         </div>
-      ) : signalItem?.error ? (
+      ) : multi?.error ? (
         <div className="flex items-center gap-1.5 text-xs text-red-400">
           <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
-          {signalItem.error}
+          {multi.error}
         </div>
-      ) : signalItem ? (
-        <div className="space-y-1.5">
-          <SignalBadge signal={signalItem.buy_signal} label="매수" />
-          <SignalBadge signal={signalItem.sell_signal} label="매도" />
-          {signalItem.updated_at && (
-            <p className="mt-1.5 text-[10px] text-slate-400 text-right">
-              {new Date(signalItem.updated_at).toLocaleDateString("ko-KR")}
+      ) : signals ? (
+        <div className="space-y-1">
+          {/* MACD */}
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-slate-500 w-14 shrink-0">MACD</span>
+            <span
+              className={cn(
+                "font-mono tabular-nums font-medium",
+                signals.macd.is_golden
+                  ? "text-emerald-500 dark:text-emerald-400"
+                  : "text-red-400",
+              )}
+            >
+              {signals.macd.gap_pct >= 0 ? "+" : ""}
+              {signals.macd.gap_pct.toFixed(2)}%
+              <span className="ml-1 text-[12px]">
+                {signals.macd.is_golden ? "Golden" : "Dead"}
+              </span>
+            </span>
+          </div>
+
+          {/* MA20/60 */}
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-slate-500 w-14 shrink-0">MA20/60</span>
+            <span
+              className={cn(
+                "font-mono tabular-nums",
+                signals.ma_cross.gap_pct > 0
+                  ? "text-emerald-500 dark:text-emerald-400"
+                  : "text-slate-400",
+              )}
+            >
+              {signals.ma_cross.gap_pct >= 0 ? "+" : ""}
+              {signals.ma_cross.gap_pct.toFixed(2)}%
+            </span>
+          </div>
+
+          {/* RSI */}
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-slate-500 w-14 shrink-0">RSI</span>
+            <span
+              className={cn(
+                "font-mono tabular-nums",
+                signals.rsi.value < 30
+                  ? "text-emerald-500 dark:text-emerald-400"
+                  : signals.rsi.value > 70
+                  ? "text-red-400"
+                  : "text-slate-600 dark:text-slate-300",
+              )}
+            >
+              {signals.rsi.value.toFixed(1)}
+            </span>
+          </div>
+
+          {/* Band distances */}
+          <div className="border-t border-slate-100 dark:border-slate-700 pt-1 space-y-1">
+            <BandRow
+              label="Env"
+              gap_pct={signals.envelope.gap_pct}
+              gap_price={signals.envelope.gap_price}
+              symbol={item.symbol}
+            />
+            <BandRow
+              label="BB"
+              gap_pct={signals.bollinger.gap_pct}
+              gap_price={signals.bollinger.gap_price}
+              symbol={item.symbol}
+            />
+            <BandRow
+              label="STARC"
+              gap_pct={signals.starc.gap_pct}
+              gap_price={signals.starc.gap_price}
+              symbol={item.symbol}
+            />
+          </div>
+
+          {multi?.updated_at && (
+            <p className="text-[10px] text-slate-400 text-right pt-0.5">
+              {new Date(multi.updated_at).toLocaleDateString("ko-KR")}
             </p>
           )}
         </div>
@@ -166,32 +216,7 @@ function SignalCard({
   );
 }
 
-// ── Param Input ───────────────────────────────────────────
-function ParamInput({
-  label,
-  value,
-  onChange,
-}: {
-  label: string;
-  value: number;
-  onChange: (v: number) => void;
-}) {
-  return (
-    <div>
-      <label className="text-xs text-slate-500 mb-1 block">{label}</label>
-      <input
-        type="number"
-        min={1}
-        max={200}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        className="w-full px-2 py-1.5 border border-slate-200 dark:border-slate-700 rounded-lg text-sm bg-white dark:bg-slate-800"
-      />
-    </div>
-  );
-}
-
-// ── Leaders Section ───────────────────────────────────────
+// ── Leaders Section ───────────────────────────────────────────
 function LeadersSection({
   title,
   leaders,
@@ -201,7 +226,7 @@ function LeadersSection({
 }: {
   title: string;
   leaders: MarketLeaderItem[];
-  signals: Map<string, SignalItem>;
+  signals: Map<string, MultiSignalItem>;
   loading: boolean;
   flagEmoji: string;
 }) {
@@ -218,7 +243,7 @@ function LeadersSection({
         {leaders.map((leader) => {
           const s = signals.get(leader.code);
           return (
-            <SignalCard
+            <MultiSignalCard
               key={leader.code}
               item={s ?? { symbol: leader.code, name: leader.name }}
               loading={loading && !s}
@@ -230,47 +255,25 @@ function LeadersSection({
   );
 }
 
-// ── Main Page ─────────────────────────────────────────────
+// ── Main Page ─────────────────────────────────────────────────
 export default function SignalPage() {
-  // 관심 종목 (localStorage)
   const [watchlist, setWatchlist] = useState<string[]>([]);
   const [inputValue, setInputValue] = useState("");
 
-  // 시장 선도주 (API)
   const [krLeaders, setKrLeaders] = useState<MarketLeaderItem[]>([]);
   const [usLeaders, setUsLeaders] = useState<MarketLeaderItem[]>([]);
   const [leadersLoading, setLeadersLoading] = useState(false);
 
-  // 전략 설정
-  const [strategyId, setStrategyId] = useState("macd_signal");
-  const [selectedStrategy, setSelectedStrategy] = useState<SignalStrategyOption>(SIGNAL_STRATEGIES[0]);
-  const [fastPeriod, setFastPeriod] = useState(12);
-  const [slowPeriod, setSlowPeriod] = useState(26);
-  const [signalPeriod, setSignalPeriod] = useState(9);
-  const [paramsOpen, setParamsOpen] = useState(false);
-
-  // 신호 데이터
-  const [leaderSignals, setLeaderSignals] = useState<Map<string, SignalItem>>(new Map());
-  const [watchlistSignals, setWatchlistSignals] = useState<Map<string, SignalItem>>(new Map());
+  const [leaderSignals, setLeaderSignals] = useState<Map<string, MultiSignalItem>>(new Map());
+  const [watchlistSignals, setWatchlistSignals] = useState<Map<string, MultiSignalItem>>(new Map());
   const [signalsLoading, setSignalsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
 
-  // 초기 watchlist 로드
   useEffect(() => {
     setWatchlist(loadWatchlist());
   }, []);
 
-  // 전략 변경 시 기본 파라미터 동기화
-  useEffect(() => {
-    const s = SIGNAL_STRATEGIES.find((s) => s.id === strategyId) ?? SIGNAL_STRATEGIES[0];
-    setSelectedStrategy(s);
-    if (s.fast_default) setFastPeriod(s.fast_default);
-    if (s.slow_default) setSlowPeriod(s.slow_default);
-    if (s.signal_default) setSignalPeriod(s.signal_default);
-  }, [strategyId]);
-
-  // 시장 선도주 로드
   const loadLeaders = useCallback(async () => {
     setLeadersLoading(true);
     try {
@@ -278,12 +281,8 @@ export default function SignalPage() {
         getMarketLeaders("kr"),
         getMarketLeaders("us"),
       ]);
-      if (kr.status === "fulfilled") {
-        setKrLeaders(kr.value.by_market_cap.slice(0, MAX_LEADERS));
-      }
-      if (us.status === "fulfilled") {
-        setUsLeaders(us.value.by_market_cap.slice(0, MAX_LEADERS));
-      }
+      if (kr.status === "fulfilled") setKrLeaders(kr.value.all_leaders);
+      if (us.status === "fulfilled") setUsLeaders(us.value.all_leaders);
     } catch (e) {
       console.error("선도주 로드 실패:", e);
     } finally {
@@ -295,63 +294,55 @@ export default function SignalPage() {
     loadLeaders();
   }, [loadLeaders]);
 
-  // 신호 계산 공통 함수
-  const calcSignals = useCallback(
-    async (symbols: string[]): Promise<SignalItem[]> => {
-      if (symbols.length === 0) return [];
-      const res = await getSignals({
-        symbols,
-        strategy_id: strategyId,
-        fast_period: fastPeriod,
-        slow_period: selectedStrategy.slow_default != null ? slowPeriod : undefined,
-        signal_period: selectedStrategy.signal_default != null ? signalPeriod : undefined,
-      });
-      return res.signals;
-    },
-    [strategyId, fastPeriod, slowPeriod, signalPeriod, selectedStrategy],
-  );
-
-  // 전체 신호 새로고침
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (forceRefresh = false) => {
     const leaderCodes = [
       ...krLeaders.map((l) => l.code),
       ...usLeaders.map((l) => l.code),
     ];
     const allSymbols = [...new Set([...leaderCodes, ...watchlist])];
+    const leaderSet = new Set(leaderCodes);
 
     if (allSymbols.length === 0) return;
     setSignalsLoading(true);
     setError(null);
+    setLeaderSignals(new Map());
+    setWatchlistSignals(new Map());
 
     try {
-      const items = await calcSignals(allSymbols);
-      const newLeaderMap = new Map<string, SignalItem>();
-      const newWatchMap = new Map<string, SignalItem>();
-      const leaderSet = new Set(leaderCodes);
+      for (let i = 0; i < allSymbols.length; i += BATCH_SIZE) {
+        const batch = allSymbols.slice(i, i + BATCH_SIZE);
+        const res = await getMultiSignals(batch, forceRefresh);
 
-      for (const item of items) {
-        if (leaderSet.has(item.symbol)) newLeaderMap.set(item.symbol, item);
-        if (watchlist.includes(item.symbol)) newWatchMap.set(item.symbol, item);
+        setLeaderSignals((prev) => {
+          const m = new Map(prev);
+          for (const item of res.signals) {
+            if (leaderSet.has(item.symbol)) m.set(item.symbol, item);
+          }
+          return m;
+        });
+        setWatchlistSignals((prev) => {
+          const m = new Map(prev);
+          for (const item of res.signals) {
+            if (watchlist.includes(item.symbol)) m.set(item.symbol, item);
+          }
+          return m;
+        });
       }
-      setLeaderSignals(newLeaderMap);
-      setWatchlistSignals(newWatchMap);
       setLastRefreshed(new Date());
     } catch (e) {
       setError(e instanceof Error ? e.message : "신호 조회 실패");
     } finally {
       setSignalsLoading(false);
     }
-  }, [krLeaders, usLeaders, watchlist, calcSignals]);
+  }, [krLeaders, usLeaders, watchlist]);
 
-  // 선도주 로드 완료 또는 전략 변경 시 자동 계산
   useEffect(() => {
     if (krLeaders.length > 0 || usLeaders.length > 0) {
-      refresh();
+      refresh(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [krLeaders, usLeaders, strategyId]);
+  }, [krLeaders, usLeaders]);
 
-  // 관심 종목 추가
   const addSymbol = useCallback(() => {
     const sym = inputValue.trim().toUpperCase();
     if (!sym || watchlist.includes(sym)) {
@@ -382,14 +373,83 @@ export default function SignalPage() {
     if (e.key === "Enter") addSymbol();
   };
 
-  // 신호 발동 카운트
-  const onCountLeaders = useMemo(
+  const goldenCount = useMemo(
     () =>
-      [...leaderSignals.values()].filter(
-        (s) => s.buy_signal?.active || s.sell_signal?.active,
-      ).length,
+      [...leaderSignals.values()].filter((s) => s.signals?.macd?.is_golden === true).length,
     [leaderSignals],
   );
+
+  const hasData = leaderSignals.size > 0 || watchlistSignals.size > 0;
+
+  const downloadCSV = useCallback(() => {
+    const headers = [
+      "Market", "Symbol", "Name", "Price",
+      "MACD%", "MACD State", "MA20/60%", "RSI",
+      "Env%", "Env Price", "BB%", "BB Price", "STARC%", "STARC Price",
+      "Updated",
+    ];
+
+    const fmt = (v: number | undefined, d = 2) =>
+      v == null || isNaN(v) ? "" : v.toFixed(d);
+
+    const rows: string[][] = [];
+
+    const addRow = (
+      market: string,
+      code: string,
+      fallbackName: string,
+      item: MultiSignalItem | undefined,
+    ) => {
+      const isUs = /^[A-Za-z]/.test(code);
+      const price = item?.current_price;
+      const priceStr =
+        price == null ? "" :
+        isUs ? `$${price.toFixed(2)}` : `₩${Math.round(price)}`;
+      const s = item?.signals;
+      rows.push([
+        market, code, item?.name || fallbackName, priceStr,
+        s ? fmt(s.macd.gap_pct, 3) : "",
+        s ? (s.macd.is_golden ? "Golden" : "Dead") : "",
+        s ? fmt(s.ma_cross.gap_pct, 3) : "",
+        s ? fmt(s.rsi.value, 1) : "",
+        s ? fmt(s.envelope.gap_pct, 3) : "",
+        s ? fmt(s.envelope.gap_price, 2) : "",
+        s ? fmt(s.bollinger.gap_pct, 3) : "",
+        s ? fmt(s.bollinger.gap_price, 2) : "",
+        s ? fmt(s.starc.gap_pct, 3) : "",
+        s ? fmt(s.starc.gap_price, 2) : "",
+        item?.updated_at
+          ? new Date(item.updated_at).toLocaleDateString("ko-KR")
+          : "",
+      ]);
+    };
+
+    for (const l of krLeaders)
+      addRow("KR", l.code, l.name, leaderSignals.get(l.code));
+    for (const l of usLeaders)
+      addRow("US", l.code, l.name, leaderSignals.get(l.code));
+    for (const sym of watchlist)
+      addRow("관심", sym, sym, watchlistSignals.get(sym));
+
+    const csv = [
+      headers.join(","),
+      ...rows.map((r) =>
+        r.map((c) => `"${c.replace(/"/g, '""')}"`).join(","),
+      ),
+    ].join("\n");
+
+    const blob = new Blob(["﻿" + csv], {
+      type: "text/csv;charset=utf-8;",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `신호알림_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [krLeaders, usLeaders, watchlist, leaderSignals, watchlistSignals]);
 
   return (
     <div className="max-w-screen-2xl mx-auto px-4 py-8">
@@ -400,53 +460,18 @@ export default function SignalPage() {
           신호 알림
         </h1>
         <p className="text-slate-600 dark:text-slate-400 mt-1">
-          한국·미국 시장 선도주의 매수/매도 신호 발동 현황과 임박도를 한눈에 확인하세요
+          MACD 크로스, MA20/60, RSI, Envelope / BB / STARC 밴드 거리를 한눈에 확인하세요
         </p>
       </div>
 
       <div className="grid xl:grid-cols-[280px_1fr] gap-6">
-        {/* 왼쪽: 설정 */}
+        {/* 왼쪽: 사이드바 */}
         <div className="space-y-4">
-          {/* 전략 선택 */}
-          <div className="card">
-            <h3 className="font-semibold text-slate-900 dark:text-white mb-3 text-sm">전략 선택</h3>
-            <select
-              value={strategyId}
-              onChange={(e) => setStrategyId(e.target.value)}
-              className="w-full px-3 py-2 border border-slate-200 dark:border-slate-700 rounded-lg bg-white dark:bg-slate-800 text-sm"
-            >
-              {SIGNAL_STRATEGIES.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
-            </select>
-
-            <button
-              onClick={() => setParamsOpen((o) => !o)}
-              className="mt-3 w-full flex items-center justify-between text-xs text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
-            >
-              <span>파라미터</span>
-              {paramsOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-            </button>
-            {paramsOpen && (
-              <div className="mt-3 space-y-2">
-                {selectedStrategy.fast_label && (
-                  <ParamInput label={selectedStrategy.fast_label} value={fastPeriod} onChange={setFastPeriod} />
-                )}
-                {selectedStrategy.slow_label && (
-                  <ParamInput label={selectedStrategy.slow_label} value={slowPeriod} onChange={setSlowPeriod} />
-                )}
-                {selectedStrategy.signal_label && (
-                  <ParamInput label={selectedStrategy.signal_label} value={signalPeriod} onChange={setSignalPeriod} />
-                )}
-              </div>
-            )}
-          </div>
-
           {/* 관심 종목 */}
           <div className="card">
-            <h3 className="font-semibold text-slate-900 dark:text-white mb-3 text-sm">관심 종목 추가</h3>
+            <h3 className="font-semibold text-slate-900 dark:text-white mb-3 text-sm">
+              관심 종목 추가
+            </h3>
             <div className="flex gap-2">
               <input
                 type="text"
@@ -486,7 +511,7 @@ export default function SignalPage() {
 
           {/* 새로고침 */}
           <button
-            onClick={refresh}
+            onClick={() => refresh(true)}
             disabled={signalsLoading || (krLeaders.length === 0 && usLeaders.length === 0)}
             className={cn(
               "w-full flex items-center justify-center gap-2 py-2.5 rounded-xl font-medium text-sm transition-all",
@@ -495,8 +520,12 @@ export default function SignalPage() {
                 : "bg-slate-200 text-slate-400 cursor-not-allowed",
             )}
           >
-            {signalsLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-            {signalsLoading ? "계산 중..." : "신호 새로고침"}
+            {signalsLoading ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <RefreshCw className="w-4 h-4" />
+            )}
+            {signalsLoading ? "가져오는 중..." : "최신 데이터 가져오기"}
           </button>
 
           {lastRefreshed && (
@@ -505,28 +534,75 @@ export default function SignalPage() {
             </p>
           )}
 
+          {/* CSV 내보내기 */}
+          <button
+            onClick={downloadCSV}
+            disabled={!hasData}
+            className={cn(
+              "w-full flex items-center justify-center gap-2 py-2.5 rounded-xl font-medium text-sm transition-all border",
+              hasData
+                ? "border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700"
+                : "border-slate-100 dark:border-slate-800 text-slate-300 dark:text-slate-600 cursor-not-allowed",
+            )}
+          >
+            <Download className="w-4 h-4" />
+            CSV 내보내기
+          </button>
+
           {/* 범례 */}
-          <div className="card text-xs text-slate-500 space-y-1.5">
-            <p className="font-semibold text-slate-700 dark:text-slate-300 mb-2">읽는 법</p>
-            <div className="flex items-center gap-2">
-              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-bold text-[10px]">
-                <TrendingUp className="w-2.5 h-2.5" /> ON
-              </span>
-              <span>매수 신호 발동</span>
+          <div className="card text-xs text-slate-500 space-y-3">
+            <p className="font-semibold text-slate-700 dark:text-slate-300">읽는 법</p>
+
+            <div className="space-y-1">
+              <p className="font-medium text-slate-600 dark:text-slate-400">MACD</p>
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-emerald-500">+0.3% Golden</span>
+                <span>MACD &gt; 시그널 (상승)</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-red-400">-0.5% Dead</span>
+                <span>MACD &lt; 시그널 (하락)</span>
+              </div>
             </div>
-            <div className="flex items-center gap-2">
-              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 font-bold text-[10px]">
-                <TrendingDown className="w-2.5 h-2.5" /> ON
-              </span>
-              <span>매도 신호 발동</span>
+
+            <div className="space-y-1">
+              <p className="font-medium text-slate-600 dark:text-slate-400">MA20/60</p>
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-emerald-500">+1.2%</span>
+                <span>20일선 위 (상승 추세)</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-slate-400">-0.8%</span>
+                <span>20일선 아래 (하락 추세)</span>
+              </div>
             </div>
-            <div className="flex items-center gap-2">
-              <span className="font-mono text-amber-500">-1.5%</span>
-              <span>발동까지 1.5% 남음</span>
+
+            <div className="space-y-1">
+              <p className="font-medium text-slate-600 dark:text-slate-400">RSI</p>
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-emerald-500">≤ 30</span>
+                <span>과매도</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-red-400">≥ 70</span>
+                <span>과매수</span>
+              </div>
             </div>
-            <div className="flex items-center gap-2">
-              <span className="font-mono text-slate-400">-5.0%</span>
-              <span>발동까지 5.0% 남음</span>
+
+            <div className="space-y-1">
+              <p className="font-medium text-slate-600 dark:text-slate-400">밴드 (Env / BB / STARC)</p>
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-emerald-500">+0.8%</span>
+                <span>상단 돌파 상태</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-amber-500">-1.5%</span>
+                <span>상단까지 1.5% 남음</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-slate-400">-5.0%</span>
+                <span>상단까지 5.0% 남음</span>
+              </div>
             </div>
           </div>
         </div>
@@ -549,14 +625,14 @@ export default function SignalPage() {
                 <span className="font-semibold text-slate-700 dark:text-slate-300">
                   {krLeaders.length + usLeaders.length}종목
                 </span>{" "}
-                중{" "}
-                <span className="font-semibold text-emerald-600">{onCountLeaders}개</span> 신호 발동
+                중 MACD Golden{" "}
+                <span className="font-semibold text-emerald-600">{goldenCount}개</span>
               </span>
               {signalsLoading && <Loader2 className="w-4 h-4 animate-spin text-slate-400" />}
             </div>
           )}
 
-          {/* 한국 선도주 */}
+          {/* 한국·미국 선도주 */}
           {leadersLoading ? (
             <div className="card flex items-center justify-center py-12 text-slate-400">
               <Loader2 className="w-6 h-6 animate-spin mr-2" />
@@ -581,7 +657,7 @@ export default function SignalPage() {
             </>
           )}
 
-          {/* 관심 종목 (커스텀) */}
+          {/* 관심 종목 */}
           {watchlist.length > 0 && (
             <div>
               <h3 className="font-semibold text-slate-800 dark:text-slate-200 mb-3 flex items-center gap-2 text-sm">
@@ -593,7 +669,7 @@ export default function SignalPage() {
                 {watchlist.map((sym) => {
                   const s = watchlistSignals.get(sym);
                   return (
-                    <SignalCard
+                    <MultiSignalCard
                       key={sym}
                       item={s ?? { symbol: sym, name: sym }}
                       loading={signalsLoading && !s}
@@ -604,7 +680,7 @@ export default function SignalPage() {
             </div>
           )}
 
-          {/* 비어있는 상태 */}
+          {/* 빈 상태 */}
           {!leadersLoading && krLeaders.length === 0 && usLeaders.length === 0 && (
             <div className="card flex flex-col items-center justify-center py-20 text-slate-400">
               <Bell className="w-16 h-16 mb-4 opacity-20" />

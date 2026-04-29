@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { TrendingUp, RefreshCw, Loader2, AlertTriangle, CheckSquare, Plus, Trash2 } from "lucide-react";
-import { getMarketLeaders, getMarketLeadersStatus, triggerMarketLeadersUpdate } from "@/lib/api/market_leaders";
+import { getMarketLeaders, getMarketLeadersStatus, triggerMarketLeadersUpdate, getMarketLeadersDefaults } from "@/lib/api/market_leaders";
 import type { MarketLeaderItem, MarketLeadersStatus, MarketType } from "@/types/market_leaders";
 import { cn } from "@/lib/utils";
 
@@ -58,9 +58,20 @@ export function MarketLeadersPanel({ selectedStocks, onAddStocks, onRemoveStocks
   const [error, setError] = useState<string | null>(null);
   const [updateMessage, setUpdateMessage] = useState<string | null>(null);
   const [showLimitSettings, setShowLimitSettings] = useState(false);
-  const [capLimit, setCapLimit] = useState(75);
-  const [revenueLimit, setRevenueLimit] = useState(75);
-  const [amountLimit, setAmountLimit] = useState(150);  const [forceUpdate, setForceUpdate] = useState(false);
+  const [capLimit, setCapLimit] = useState(100);
+  const [revenueLimit, setRevenueLimit] = useState(100);
+  const [amountLimit, setAmountLimit] = useState(200);
+
+  // 백엔드 DEFAULT 값으로 초기화
+  useEffect(() => {
+    getMarketLeadersDefaults()
+      .then((d) => {
+        setCapLimit(d.cap_limit);
+        setRevenueLimit(d.revenue_limit);
+        setAmountLimit(d.amount_limit);
+      })
+      .catch(() => {/* 실패 시 하드코딩 기본값 유지 */});
+  }, []);  const [forceUpdate, setForceUpdate] = useState(false);
   const loadData = useCallback(async (m: MarketType) => {
     setIsLoading(true);
     setError(null);

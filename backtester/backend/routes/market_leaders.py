@@ -45,9 +45,9 @@ _KR_ETF_NAME_KEYWORDS = frozenset({
 })
 
 # 기본 순위 기준 (변경 시 이 값만 수정하면 됨)
-DEFAULT_CAP_LIMIT: int = 75
-DEFAULT_REVENUE_LIMIT: int = 75
-DEFAULT_AMOUNT_LIMIT: int = 150
+DEFAULT_CAP_LIMIT: int = 100
+DEFAULT_REVENUE_LIMIT: int = 100
+DEFAULT_AMOUNT_LIMIT: int = 200
 
 
 # ============================================
@@ -847,6 +847,16 @@ async def _do_update_us(
 # ============================================
 # API 엔드포인트
 # ============================================
+
+
+@router.get("/defaults", summary="기본 순위 기준값 조회")
+async def get_defaults() -> dict:
+    """DEFAULT_CAP_LIMIT / DEFAULT_REVENUE_LIMIT / DEFAULT_AMOUNT_LIMIT 반환"""
+    return {
+        "cap_limit": DEFAULT_CAP_LIMIT,
+        "revenue_limit": DEFAULT_REVENUE_LIMIT,
+        "amount_limit": DEFAULT_AMOUNT_LIMIT,
+    }
 
 
 @router.get("/status", response_model=MarketLeadersStatus)

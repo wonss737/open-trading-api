@@ -39,7 +39,7 @@ fi
 # Start backend
 cd "$SCRIPT_DIR"
 echo "[Backend] Starting on port 8002..."
-uv run python -m uvicorn backend.main:app --host 0.0.0.0 --port 8002 --reload --reload-exclude ".lean-workspace" &
+uv run python -m uvicorn backend.main:app --host 0.0.0.0 --port 8002 &
 BACKEND_PID=$!
 
 # Wait for backend
