@@ -4,12 +4,13 @@ export interface SignalStatus {
 }
 
 export interface MultiSignalData {
-  macd:     { gap_pct: number; is_golden: boolean };
-  ma_cross: { gap_pct: number };
-  rsi:      { value: number };
-  envelope: { gap_pct: number; gap_price: number };
-  bollinger:{ gap_pct: number; gap_price: number };
-  starc:    { gap_pct: number; gap_price: number };
+  macd:             { gap_pct: number; is_golden: boolean };
+  ma_cross:         { gap_pct: number };
+  rsi:              { value: number };
+  envelope:         { gap_pct: number; gap_price: number };
+  bollinger:        { gap_pct: number; gap_price: number };
+  starc:            { gap_pct: number; gap_price: number };
+  price_change_15d: { pct: number };
 }
 
 export interface MultiSignalItem {

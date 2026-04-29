@@ -23,3 +23,9 @@ export async function getMultiSignals(symbols: string[], forceRefresh = false): 
   if (forceRefresh) qs.set("force_refresh", "true");
   return apiGet<MultiSignalsResponse>(`/api/signals/multi?${qs}`);
 }
+
+export async function getSectors(symbols: string[]): Promise<Record<string, string>> {
+  const qs = new URLSearchParams({ symbols: symbols.join(",") });
+  const res = await apiGet<{ sectors: Record<string, string> }>(`/api/signals/sectors?${qs}`);
+  return res.sectors;
+}

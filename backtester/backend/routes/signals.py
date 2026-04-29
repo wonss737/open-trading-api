@@ -3,6 +3,7 @@
 각 종목에 대해 매수/매도 신호의 발동 여부 및 임박도(%)를 계산합니다.
 """
 
+import asyncio
 import json
 import logging
 import numpy as np
@@ -383,13 +384,18 @@ def calc_multi_signal(df: pd.DataFrame) -> dict:
     starc_gap_price = float(price - starc_upper)
     starc_gap_pct   = float(starc_gap_price / price * 100)
 
+    # 15일 등락률 (15 trading days ago)
+    price_15d_ago = float(close.iloc[-16]) if close.iloc[-16] else price
+    price_change_15d = (price - price_15d_ago) / price_15d_ago * 100 if price_15d_ago else 0.0
+
     return {
-        "macd":     {"gap_pct": round(macd_gap_pct, 3), "is_golden": bool(macd_gap_pct > 0)},
-        "ma_cross": {"gap_pct": round(ma_gap_pct, 3)},
-        "rsi":      {"value": round(rsi_val, 1)},
-        "envelope": {"gap_pct": round(env_gap_pct, 3), "gap_price": round(env_gap_price, 2)},
-        "bollinger":{"gap_pct": round(bb_gap_pct, 3),  "gap_price": round(bb_gap_price, 2)},
-        "starc":    {"gap_pct": round(starc_gap_pct, 3),"gap_price": round(starc_gap_price, 2)},
+        "macd":            {"gap_pct": round(macd_gap_pct, 3), "is_golden": bool(macd_gap_pct > 0)},
+        "ma_cross":        {"gap_pct": round(ma_gap_pct, 3)},
+        "rsi":             {"value": round(rsi_val, 1)},
+        "envelope":        {"gap_pct": round(env_gap_pct, 3), "gap_price": round(env_gap_price, 2)},
+        "bollinger":       {"gap_pct": round(bb_gap_pct, 3),  "gap_price": round(bb_gap_price, 2)},
+        "starc":           {"gap_pct": round(starc_gap_pct, 3),"gap_price": round(starc_gap_price, 2)},
+        "price_change_15d":{"pct": round(price_change_15d, 2)},
     }
 
 
@@ -591,8 +597,38 @@ def _get_stock_name(symbol: str) -> str:
 
 
 # ============================================================
+# 섹터 조회 (.master/sectors.json)
+# ============================================================
+
+_sector_mem: dict[str, str] = {}
+
+
+def _load_sector_cache() -> dict[str, str]:
+    if _sector_mem:
+        return dict(_sector_mem)
+    try:
+        p = LeanProjectManager().workspace.parent / ".master" / "sectors.json"
+        if p.exists():
+            with open(p, "r", encoding="utf-8") as f:
+                _sector_mem.update(json.load(f))
+    except Exception as e:
+        logger.warning(f"섹터 캐시 로드 실패: {e}")
+    return dict(_sector_mem)
+
+
+# ============================================================
 # API
 # ============================================================
+
+@router.get("/sectors", summary="종목별 섹터 조회")
+async def get_sectors(
+    symbols: str = Query(..., description="콤마 구분 종목코드"),
+):
+    """종목별 섹터 반환 (.master/sectors.json 기준, 미등록 종목은 '기타' 반환)."""
+    symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    cache = _load_sector_cache()
+    return {"sectors": {s: cache.get(s, "기타") for s in symbol_list}}
+
 
 @router.get("", summary="종목별 매수/매도 신호 조회")
 async def get_signals(

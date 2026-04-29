@@ -12,12 +12,14 @@ import {
   Download,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { getMultiSignals, getMarketLeaders } from "@/lib/api";
+import { getMultiSignals, getMarketLeaders, getSectors, triggerMarketLeadersUpdate } from "@/lib/api";
 import type { MultiSignalItem } from "@/types/signals";
 import type { MarketLeaderItem } from "@/types/market_leaders";
 
 const LOCALSTORAGE_KEY = "signal_watchlist_v2";
 const BATCH_SIZE = 10;
+
+type LeaderWithMarket = MarketLeaderItem & { market: "kr" | "us" };
 
 function loadWatchlist(): string[] {
   if (typeof window === "undefined") return [];
@@ -80,6 +82,42 @@ function BandRow({
   );
 }
 
+// ── Sort helpers ──────────────────────────────────────────────
+type SortField =
+  | "none"
+  | "price_change_15d"
+  | "macd"
+  | "ma_cross"
+  | "rsi"
+  | "envelope"
+  | "bollinger"
+  | "starc";
+
+const SORT_OPTIONS: { value: SortField; label: string }[] = [
+  { value: "none",             label: "정렬 없음" },
+  { value: "price_change_15d", label: "15일 등락률" },
+  { value: "macd",             label: "MACD %" },
+  { value: "ma_cross",         label: "MA20/60 %" },
+  { value: "rsi",              label: "RSI" },
+  { value: "envelope",         label: "Envelope %" },
+  { value: "bollinger",        label: "BB %" },
+  { value: "starc",            label: "STARC %" },
+];
+
+function getSortValue(item: MultiSignalItem | undefined, field: SortField): number {
+  if (!item?.signals) return -Infinity;
+  switch (field) {
+    case "price_change_15d": return item.signals.price_change_15d.pct;
+    case "macd":             return item.signals.macd.gap_pct;
+    case "ma_cross":         return item.signals.ma_cross.gap_pct;
+    case "rsi":              return item.signals.rsi.value;
+    case "envelope":         return item.signals.envelope.gap_pct;
+    case "bollinger":        return item.signals.bollinger.gap_pct;
+    case "starc":            return item.signals.starc.gap_pct;
+    default:                 return 0;
+  }
+}
+
 // ── Multi Signal Card ─────────────────────────────────────────
 function MultiSignalCard({
   item,
@@ -92,6 +130,7 @@ function MultiSignalCard({
     "signals" in item || "error" in item ? (item as MultiSignalItem) : null;
   const signals = multi?.signals;
   const isGolden = signals?.macd.is_golden;
+  const isUs = /^[A-Za-z]/.test(item.symbol);
 
   return (
     <div
@@ -103,9 +142,12 @@ function MultiSignalCard({
       {/* Header */}
       <div className="flex items-start justify-between mb-2">
         <div className="min-w-0 flex-1">
-          <p className="font-semibold text-slate-900 dark:text-white text-sm leading-tight truncate">
-            {item.name !== item.symbol ? item.name : item.symbol}
-          </p>
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs leading-none shrink-0">{isUs ? "🇺🇸" : "🇰🇷"}</span>
+            <p className="font-semibold text-slate-900 dark:text-white text-sm leading-tight truncate">
+              {item.name !== item.symbol ? item.name : item.symbol}
+            </p>
+          </div>
           {item.name !== item.symbol && (
             <p className="text-xs text-slate-400 font-mono mt-0.5">{item.symbol}</p>
           )}
@@ -181,6 +223,24 @@ function MultiSignalCard({
             </span>
           </div>
 
+          {/* 15일 등락률 */}
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-slate-500 w-14 shrink-0">15일</span>
+            <span
+              className={cn(
+                "font-mono tabular-nums font-medium",
+                signals.price_change_15d.pct > 0
+                  ? "text-emerald-500 dark:text-emerald-400"
+                  : signals.price_change_15d.pct < 0
+                  ? "text-red-400"
+                  : "text-slate-400",
+              )}
+            >
+              {signals.price_change_15d.pct >= 0 ? "+" : ""}
+              {signals.price_change_15d.pct.toFixed(2)}%
+            </span>
+          </div>
+
           {/* Band distances */}
           <div className="border-t border-slate-100 dark:border-slate-700 pt-1 space-y-1">
             <BandRow
@@ -216,31 +276,35 @@ function MultiSignalCard({
   );
 }
 
-// ── Leaders Section ───────────────────────────────────────────
-function LeadersSection({
-  title,
+// ── Sector Group ──────────────────────────────────────────────
+function SectorGroup({
+  sector,
   leaders,
   signals,
   loading,
-  flagEmoji,
+  sortField,
 }: {
-  title: string;
-  leaders: MarketLeaderItem[];
+  sector: string;
+  leaders: LeaderWithMarket[];
   signals: Map<string, MultiSignalItem>;
   loading: boolean;
-  flagEmoji: string;
+  sortField: SortField;
 }) {
-  if (leaders.length === 0) return null;
+  const sorted = useMemo(() => {
+    if (sortField === "none") return leaders;
+    return [...leaders].sort(
+      (a, b) => getSortValue(signals.get(b.code), sortField) - getSortValue(signals.get(a.code), sortField),
+    );
+  }, [leaders, signals, sortField]);
 
   return (
     <div>
       <h3 className="font-semibold text-slate-800 dark:text-slate-200 mb-3 flex items-center gap-2 text-sm">
-        <span>{flagEmoji}</span>
-        {title}
+        {sector}
         <span className="text-slate-400 font-normal">({leaders.length}종목)</span>
       </h3>
       <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
-        {leaders.map((leader) => {
+        {sorted.map((leader) => {
           const s = signals.get(leader.code);
           return (
             <MultiSignalCard
@@ -264,11 +328,16 @@ export default function SignalPage() {
   const [usLeaders, setUsLeaders] = useState<MarketLeaderItem[]>([]);
   const [leadersLoading, setLeadersLoading] = useState(false);
 
+  const [sectors, setSectors] = useState<Record<string, string>>({});
+  const [sectorsLoading, setSectorsLoading] = useState(false);
+
   const [leaderSignals, setLeaderSignals] = useState<Map<string, MultiSignalItem>>(new Map());
   const [watchlistSignals, setWatchlistSignals] = useState<Map<string, MultiSignalItem>>(new Map());
   const [signalsLoading, setSignalsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
+  const [leadersUpdateMsg, setLeadersUpdateMsg] = useState<string | null>(null);
+  const [sortField, setSortField] = useState<SortField>("none");
 
   useEffect(() => {
     setWatchlist(loadWatchlist());
@@ -293,6 +362,17 @@ export default function SignalPage() {
   useEffect(() => {
     loadLeaders();
   }, [loadLeaders]);
+
+  // Fetch sectors whenever leaders change
+  useEffect(() => {
+    const codes = [...krLeaders.map((l) => l.code), ...usLeaders.map((l) => l.code)];
+    if (codes.length === 0) return;
+    setSectorsLoading(true);
+    getSectors(codes)
+      .then((data: Record<string, string>) => setSectors(data))
+      .catch((e: unknown) => console.error("섹터 로드 실패:", e))
+      .finally(() => setSectorsLoading(false));
+  }, [krLeaders, usLeaders]);
 
   const refresh = useCallback(async (forceRefresh = false) => {
     const leaderCodes = [
@@ -336,6 +416,28 @@ export default function SignalPage() {
     }
   }, [krLeaders, usLeaders, watchlist]);
 
+  // Fires signal refresh + market leaders updates simultaneously
+  const handleUpdate = useCallback(() => {
+    refresh(true);
+
+    setLeadersUpdateMsg("선도주 데이터 업데이트 시작 중...");
+    Promise.allSettled([
+      triggerMarketLeadersUpdate({ market: "kr", force: true }),
+      triggerMarketLeadersUpdate({ market: "us", force: true }),
+    ]).then((results) => {
+      const started = results.filter((r) => r.status === "fulfilled").length;
+      const failed  = results.filter((r) => r.status === "rejected").length;
+      if (failed === 2) {
+        setLeadersUpdateMsg("선도주 업데이트 실패 (인증 필요)");
+      } else {
+        setLeadersUpdateMsg(
+          `선도주 업데이트 시작됨 (${started === 2 ? "KR + US" : started === 1 ? "1개 시장" : ""}) — 완료까지 수 분 소요`
+        );
+      }
+      setTimeout(() => setLeadersUpdateMsg(null), 8000);
+    });
+  }, [refresh]);
+
   useEffect(() => {
     if (krLeaders.length > 0 || usLeaders.length > 0) {
       refresh(false);
@@ -373,6 +475,29 @@ export default function SignalPage() {
     if (e.key === "Enter") addSymbol();
   };
 
+  // Merge and group leaders by sector
+  const allLeaders = useMemo<LeaderWithMarket[]>(
+    () => [
+      ...krLeaders.map((l) => ({ ...l, market: "kr" as const })),
+      ...usLeaders.map((l) => ({ ...l, market: "us" as const })),
+    ],
+    [krLeaders, usLeaders],
+  );
+
+  const sectorGroups = useMemo(() => {
+    const groups = new Map<string, LeaderWithMarket[]>();
+    for (const leader of allLeaders) {
+      const sector = sectors[leader.code] ?? "기타";
+      if (!groups.has(sector)) groups.set(sector, []);
+      groups.get(sector)!.push(leader);
+    }
+    return [...groups.entries()].sort(([a], [b]) => {
+      if (a === "기타") return 1;
+      if (b === "기타") return -1;
+      return a.localeCompare(b, "ko");
+    });
+  }, [allLeaders, sectors]);
+
   const goldenCount = useMemo(
     () =>
       [...leaderSignals.values()].filter((s) => s.signals?.macd?.is_golden === true).length,
@@ -383,7 +508,8 @@ export default function SignalPage() {
 
   const downloadCSV = useCallback(() => {
     const headers = [
-      "Market", "Symbol", "Name", "Price",
+      "Market", "Symbol", "Name", "Sector", "Price",
+      "15일등락률%",
       "MACD%", "MACD State", "MA20/60%", "RSI",
       "Env%", "Env Price", "BB%", "BB Price", "STARC%", "STARC Price",
       "Updated",
@@ -407,7 +533,9 @@ export default function SignalPage() {
         isUs ? `$${price.toFixed(2)}` : `₩${Math.round(price)}`;
       const s = item?.signals;
       rows.push([
-        market, code, item?.name || fallbackName, priceStr,
+        market, code, item?.name || fallbackName, sectors[code] ?? "",
+        priceStr,
+        s ? fmt(s.price_change_15d.pct, 2) : "",
         s ? fmt(s.macd.gap_pct, 3) : "",
         s ? (s.macd.is_golden ? "Golden" : "Dead") : "",
         s ? fmt(s.ma_cross.gap_pct, 3) : "",
@@ -449,7 +577,7 @@ export default function SignalPage() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  }, [krLeaders, usLeaders, watchlist, leaderSignals, watchlistSignals]);
+  }, [krLeaders, usLeaders, watchlist, leaderSignals, watchlistSignals, sectors]);
 
   return (
     <div className="max-w-screen-2xl mx-auto px-4 py-8">
@@ -511,7 +639,7 @@ export default function SignalPage() {
 
           {/* 새로고침 */}
           <button
-            onClick={() => refresh(true)}
+            onClick={handleUpdate}
             disabled={signalsLoading || (krLeaders.length === 0 && usLeaders.length === 0)}
             className={cn(
               "w-full flex items-center justify-center gap-2 py-2.5 rounded-xl font-medium text-sm transition-all",
@@ -534,6 +662,12 @@ export default function SignalPage() {
             </p>
           )}
 
+          {leadersUpdateMsg && (
+            <p className="text-xs text-slate-500 dark:text-slate-400 text-center leading-snug">
+              {leadersUpdateMsg}
+            </p>
+          )}
+
           {/* CSV 내보내기 */}
           <button
             onClick={downloadCSV}
@@ -548,6 +682,23 @@ export default function SignalPage() {
             <Download className="w-4 h-4" />
             CSV 내보내기
           </button>
+
+          {/* 섹터 내 정렬 기준 */}
+          <div className="card space-y-2">
+            <p className="text-xs font-semibold text-slate-700 dark:text-slate-300">섹터 내 정렬 기준</p>
+            <select
+              value={sortField}
+              onChange={(e) => setSortField(e.target.value as SortField)}
+              className="w-full text-xs px-2 py-1.5 border border-slate-200 dark:border-slate-700 rounded-lg bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 focus:outline-none focus:ring-1 focus:ring-kis-blue"
+            >
+              {SORT_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+            {sortField !== "none" && (
+              <p className="text-[10px] text-slate-400">내림차순 · 데이터 없는 종목은 맨 뒤</p>
+            )}
+          </div>
 
           {/* 범례 */}
           <div className="card text-xs text-slate-500 space-y-3">
@@ -617,22 +768,24 @@ export default function SignalPage() {
           )}
 
           {/* 상태 요약 */}
-          {!leadersLoading && (krLeaders.length > 0 || usLeaders.length > 0) && (
+          {!leadersLoading && allLeaders.length > 0 && (
             <div className="flex items-center gap-4 text-sm text-slate-500">
               <Globe className="w-4 h-4 text-slate-400" />
               <span>
                 시장 선도주{" "}
                 <span className="font-semibold text-slate-700 dark:text-slate-300">
-                  {krLeaders.length + usLeaders.length}종목
+                  {allLeaders.length}종목
                 </span>{" "}
-                중 MACD Golden{" "}
+                ({krLeaders.length}개 🇰🇷 · {usLeaders.length}개 🇺🇸) 중 MACD Golden{" "}
                 <span className="font-semibold text-emerald-600">{goldenCount}개</span>
               </span>
-              {signalsLoading && <Loader2 className="w-4 h-4 animate-spin text-slate-400" />}
+              {(signalsLoading || sectorsLoading) && (
+                <Loader2 className="w-4 h-4 animate-spin text-slate-400" />
+              )}
             </div>
           )}
 
-          {/* 한국·미국 선도주 */}
+          {/* 섹터별 그룹 */}
           {leadersLoading ? (
             <div className="card flex items-center justify-center py-12 text-slate-400">
               <Loader2 className="w-6 h-6 animate-spin mr-2" />
@@ -640,20 +793,16 @@ export default function SignalPage() {
             </div>
           ) : (
             <>
-              <LeadersSection
-                title="한국 시장 선도주"
-                leaders={krLeaders}
-                signals={leaderSignals}
-                loading={signalsLoading}
-                flagEmoji="🇰🇷"
-              />
-              <LeadersSection
-                title="미국 시장 선도주"
-                leaders={usLeaders}
-                signals={leaderSignals}
-                loading={signalsLoading}
-                flagEmoji="🇺🇸"
-              />
+              {sectorGroups.map(([sector, leaders]) => (
+                <SectorGroup
+                  key={sector}
+                  sector={sector}
+                  leaders={leaders}
+                  signals={leaderSignals}
+                  loading={signalsLoading}
+                  sortField={sortField}
+                />
+              ))}
             </>
           )}
 
@@ -681,7 +830,7 @@ export default function SignalPage() {
           )}
 
           {/* 빈 상태 */}
-          {!leadersLoading && krLeaders.length === 0 && usLeaders.length === 0 && (
+          {!leadersLoading && allLeaders.length === 0 && (
             <div className="card flex flex-col items-center justify-center py-20 text-slate-400">
               <Bell className="w-16 h-16 mb-4 opacity-20" />
               <p className="text-lg font-medium">시장 선도주 없음</p>
