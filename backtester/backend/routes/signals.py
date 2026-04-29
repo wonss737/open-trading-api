@@ -728,6 +728,11 @@ async def get_multi_signals(
             current_price = float(df["close"].iloc[-1])
             updated_at = df["date"].iloc[-1].isoformat()
             signals = calc_multi_signal(df)
+            ohlc_15d = [
+                {"o": round(float(r["open"]), 2), "h": round(float(r["high"]), 2),
+                 "l": round(float(r["low"]),  2), "c": round(float(r["close"]), 2)}
+                for _, r in df.iloc[-15:].iterrows()
+            ]
 
             results.append({
                 "symbol": symbol,
@@ -735,6 +740,7 @@ async def get_multi_signals(
                 "current_price": current_price,
                 "signals": signals,
                 "updated_at": updated_at,
+                "ohlc_15d": ohlc_15d,
             })
         except Exception as e:
             logger.warning(f"[MultiSignal] {symbol} 계산 실패: {e}")

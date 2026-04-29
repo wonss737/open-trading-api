@@ -82,6 +82,46 @@ function BandRow({
   );
 }
 
+// ── Candlestick Chart ─────────────────────────────────────────
+function CandlestickChart({ bars }: { bars: { o: number; h: number; l: number; c: number }[] }) {
+  if (bars.length < 2) return null;
+  const allPrices = bars.flatMap((b) => [b.h, b.l]);
+  const min = Math.min(...allPrices);
+  const max = Math.max(...allPrices);
+  const range = max - min || 1;
+  const W = 120;
+  const H = 56;
+  const pad = 1;
+  const barW = W / bars.length;
+  const bodyW = Math.max(1, barW * 0.55);
+  const bodyOffset = (barW - bodyW) / 2;
+  const toY = (p: number) => ((max - p) / range) * (H - pad * 2) + pad;
+
+  return (
+    <svg
+      viewBox={`0 0 ${W} ${H}`}
+      className="w-full"
+      style={{ height: 56 }}
+      preserveAspectRatio="none"
+    >
+      {bars.map((b, i) => {
+        const isUp = b.c >= b.o;
+        const color = isUp ? "#ef4444" : "#3b82f6";
+        const bodyTop = toY(Math.max(b.o, b.c));
+        const bodyBot = toY(Math.min(b.o, b.c));
+        const bodyH = Math.max(1, bodyBot - bodyTop);
+        const cx = i * barW + barW / 2;
+        return (
+          <g key={i}>
+            <line x1={cx} y1={toY(b.h)} x2={cx} y2={toY(b.l)} stroke={color} strokeWidth={0.7} />
+            <rect x={i * barW + bodyOffset} y={bodyTop} width={bodyW} height={bodyH} fill={color} />
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
 // ── Sort helpers ──────────────────────────────────────────────
 type SortField =
   | "none"
@@ -265,6 +305,12 @@ function MultiSignalCard({
             <p className="text-[10px] text-slate-400 text-right pt-0.5">
               {new Date(multi.updated_at).toLocaleDateString("ko-KR")}
             </p>
+          )}
+
+          {multi?.ohlc_15d && multi.ohlc_15d.length >= 2 && (
+            <div className="border-t border-slate-100 dark:border-slate-700 pt-1.5">
+              <CandlestickChart bars={multi.ohlc_15d} />
+            </div>
           )}
         </div>
       ) : (

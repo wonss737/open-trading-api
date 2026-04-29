@@ -19,6 +19,7 @@ export interface MultiSignalItem {
   current_price: number | null;
   signals?: MultiSignalData;
   updated_at?: string;
+  ohlc_15d?: { o: number; h: number; l: number; c: number }[];
   error?: string;
 }
 
