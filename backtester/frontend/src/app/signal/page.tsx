@@ -10,6 +10,8 @@ import {
   Loader2,
   Globe,
   Download,
+  CheckSquare,
+  Square,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { getMultiSignals, getMarketLeaders, getSectors, triggerMarketLeadersUpdate } from "@/lib/api";
@@ -17,6 +19,7 @@ import type { MultiSignalItem } from "@/types/signals";
 import type { MarketLeaderItem } from "@/types/market_leaders";
 
 const LOCALSTORAGE_KEY = "signal_watchlist_v2";
+const CHECKED_KEY = "signal_checked_v1";
 const BATCH_SIZE = 10;
 
 type LeaderWithMarket = MarketLeaderItem & { market: "kr" | "us" };
@@ -162,9 +165,13 @@ function getSortValue(item: MultiSignalItem | undefined, field: SortField): numb
 function MultiSignalCard({
   item,
   loading,
+  isChecked = false,
+  onToggle,
 }: {
   item: MultiSignalItem | { symbol: string; name: string };
   loading?: boolean;
+  isChecked?: boolean;
+  onToggle?: () => void;
 }) {
   const multi =
     "signals" in item || "error" in item ? (item as MultiSignalItem) : null;
@@ -177,6 +184,7 @@ function MultiSignalCard({
       className={cn(
         "card transition-all",
         isGolden && "border-emerald-300 dark:border-emerald-700",
+        isChecked && "ring-1 ring-kis-blue/40",
       )}
     >
       {/* Header */}
@@ -190,11 +198,28 @@ function MultiSignalCard({
           </div>
           <p className="text-xs text-slate-400 font-mono mt-0.5">{item.symbol}</p>
         </div>
-        {multi?.current_price != null && (
-          <p className="text-sm font-mono font-bold text-slate-700 dark:text-slate-300 ml-2 shrink-0">
-            {formatPrice(multi.current_price, item.symbol)}
-          </p>
-        )}
+        <div className="flex items-start gap-1.5 ml-2 shrink-0">
+          {multi?.current_price != null && (
+            <p className="text-sm font-mono font-bold text-slate-700 dark:text-slate-300">
+              {formatPrice(multi.current_price, item.symbol)}
+            </p>
+          )}
+          <button
+            onClick={(e) => { e.stopPropagation(); onToggle?.(); }}
+            className={cn(
+              "mt-0.5 transition-colors",
+              isChecked
+                ? "text-kis-blue"
+                : "text-slate-300 hover:text-slate-400 dark:text-slate-600 dark:hover:text-slate-500",
+            )}
+            aria-label={isChecked ? "체크 해제" : "체크"}
+          >
+            {isChecked
+              ? <CheckSquare className="w-3.5 h-3.5" />
+              : <Square className="w-3.5 h-3.5" />
+            }
+          </button>
+        </div>
       </div>
 
       {loading ? (
@@ -327,12 +352,16 @@ function SectorGroup({
   signals,
   loading,
   sortField,
+  checkedSymbols,
+  onToggle,
 }: {
   sector: string;
   leaders: LeaderWithMarket[];
   signals: Map<string, MultiSignalItem>;
   loading: boolean;
   sortField: SortField;
+  checkedSymbols: Set<string>;
+  onToggle: (sym: string) => void;
 }) {
   const sorted = useMemo(() => {
     if (sortField === "none") return leaders;
@@ -355,6 +384,8 @@ function SectorGroup({
               key={leader.code}
               item={s ?? { symbol: leader.code, name: leader.name }}
               loading={loading && !s}
+              isChecked={checkedSymbols.has(leader.code)}
+              onToggle={() => onToggle(leader.code)}
             />
           );
         })}
@@ -382,6 +413,23 @@ export default function SignalPage() {
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
   const [leadersUpdateMsg, setLeadersUpdateMsg] = useState<string | null>(null);
   const [sortField, setSortField] = useState<SortField>("none");
+  const [checkedSymbols, setCheckedSymbols] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(CHECKED_KEY) || "[]");
+      if (Array.isArray(saved)) setCheckedSymbols(new Set<string>(saved));
+    } catch { /* ignore */ }
+  }, []);
+
+  const toggleChecked = useCallback((sym: string) => {
+    setCheckedSymbols((prev) => {
+      const next = new Set(prev);
+      if (next.has(sym)) next.delete(sym); else next.add(sym);
+      localStorage.setItem(CHECKED_KEY, JSON.stringify([...next]));
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     setWatchlist(loadWatchlist());
@@ -535,12 +583,29 @@ export default function SignalPage() {
       if (!groups.has(sector)) groups.set(sector, []);
       groups.get(sector)!.push(leader);
     }
-    return [...groups.entries()].sort(([a], [b]) => {
-      if (a === "기타") return 1;
-      if (b === "기타") return -1;
-      return a.localeCompare(b, "ko");
+    return [...groups.entries()].sort(([sectorA, leadersA], [sectorB, leadersB]) => {
+      if (sectorA === "기타") return 1;
+      if (sectorB === "기타") return -1;
+      if (sortField !== "none") {
+        const avg = (leaders: LeaderWithMarket[]) => {
+          const vals = leaders
+            .map((l) => getSortValue(leaderSignals.get(l.code), sortField))
+            .filter((v) => v !== -Infinity);
+          return vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : -Infinity;
+        };
+        return avg(leadersB) - avg(leadersA);
+      }
+      return sectorA.localeCompare(sectorB, "ko");
     });
-  }, [allLeaders, sectors]);
+  }, [allLeaders, sectors, sortField, leaderSignals]);
+
+  const checkedItems = useMemo(() => {
+    return [...checkedSymbols].map((sym) => {
+      const signal = leaderSignals.get(sym) ?? watchlistSignals.get(sym);
+      const leader = allLeaders.find((l) => l.code === sym);
+      return { symbol: sym, name: signal?.name ?? leader?.name ?? sym };
+    });
+  }, [checkedSymbols, leaderSignals, watchlistSignals, allLeaders]);
 
   const goldenCount = useMemo(
     () =>
@@ -727,9 +792,9 @@ export default function SignalPage() {
             CSV 내보내기
           </button>
 
-          {/* 섹터 내 정렬 기준 */}
+          {/* 정렬 기준 */}
           <div className="card space-y-2">
-            <p className="text-xs font-semibold text-slate-700 dark:text-slate-300">섹터 내 정렬 기준</p>
+            <p className="text-xs font-semibold text-slate-700 dark:text-slate-300">정렬 기준</p>
             <select
               value={sortField}
               onChange={(e) => setSortField(e.target.value as SortField)}
@@ -743,6 +808,32 @@ export default function SignalPage() {
               <p className="text-[10px] text-slate-400">내림차순 · 데이터 없는 종목은 맨 뒤</p>
             )}
           </div>
+
+          {/* 체크된 종목 */}
+          {checkedItems.length > 0 && (
+            <div className="card space-y-2">
+              <p className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                체크된 종목{" "}
+                <span className="font-normal text-slate-400">({checkedItems.length})</span>
+              </p>
+              <div className="space-y-1">
+                {checkedItems.map(({ symbol, name }) => (
+                  <div key={symbol} className="flex items-center gap-1.5 text-xs">
+                    <span className="font-mono text-slate-700 dark:text-slate-300 shrink-0">{symbol}</span>
+                    {name !== symbol && (
+                      <span className="text-slate-400 truncate flex-1">{name}</span>
+                    )}
+                    <button
+                      onClick={() => toggleChecked(symbol)}
+                      className="ml-auto text-slate-300 hover:text-red-400 transition-colors shrink-0"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* 범례 */}
           <div className="card text-xs text-slate-500 space-y-3">
@@ -845,6 +936,8 @@ export default function SignalPage() {
                   signals={leaderSignals}
                   loading={signalsLoading}
                   sortField={sortField}
+                  checkedSymbols={checkedSymbols}
+                  onToggle={toggleChecked}
                 />
               ))}
             </>
@@ -866,6 +959,8 @@ export default function SignalPage() {
                       key={sym}
                       item={s ?? { symbol: sym, name: sym }}
                       loading={signalsLoading && !s}
+                      isChecked={checkedSymbols.has(sym)}
+                      onToggle={() => toggleChecked(sym)}
                     />
                   );
                 })}
